@@ -282,7 +282,7 @@ function bake(scene) {
 /** Sunbeams: sheets along the light through each bay, masked by the window bars; dust that only shows inside them. */
 export function buildLight(scene) {
     const mask = /* glsl */`
-        uniform vec3 sun; uniform vec4 bays[4]; uniform float time;
+        uniform vec3 sun; uniform vec4 bays[4]; uniform float time; uniform float haze;
         float inBeam(vec3 p) {
             float t = (${(-W / 2).toFixed(2)} - p.x) / sun.x;   // walk back along the light to the window plane
             vec2 q = p.zy + sun.zy * t;
@@ -296,7 +296,7 @@ export function buildLight(scene) {
             }
             return m * step(0., t) * exp(-t * .12);
         }`;
-    const uniforms = { sun: { value: SUN }, bays: { value: WINDOWS.map(([a, b]) => new Vector4(a, SILL, b, HEAD)) }, time: { value: 0 } };
+    const uniforms = { sun: { value: SUN }, bays: { value: WINDOWS.map(([a, b]) => new Vector4(a, SILL, b, HEAD)) }, time: { value: 0 }, haze: { value: 1 } };   // haze: how much is in the air; the beams thicken as the room comes down
     // Sheets: for each bay, a fan of planes containing the light direction, spread across the bay.
     const positions = [], down = SUN.clone().negate();
     for (const [a, b] of WINDOWS) for (let k = 0; k < 7; k++) {
@@ -314,7 +314,7 @@ export function buildLight(scene) {
             void main() {
                 float near = smoothstep(.3, 1.2, distance(vP, cameraPosition));
                 float m = inBeam(vP) * near * step(0., vP.y);
-                gl_FragColor = vec4(vec3(1., .86, .62) * m * .035, 1.);
+                gl_FragColor = vec4(vec3(1., .86, .62) * m * .035 * haze, 1.);
             }`,
     }));
     beams.frustumCulled = false;
@@ -330,7 +330,7 @@ export function buildLight(scene) {
             void main() {
                 vec3 p = position + vec3(sin(time * .11 + position.y * 3.), sin(time * .07 + position.x * 2.) * .5 - .2, cos(time * .09 + position.z * 3.)) * .25;
                 p.y = mod(p.y, ${H.toFixed(1)});
-                vB = .06 + inBeam(p);
+                vB = .06 / haze + inBeam(p) * (.6 + .4 * haze);   // in a thick haze the shadows go dark and the beams go solid
                 vec4 mv = modelViewMatrix * vec4(p, 1.);
                 gl_PointSize = clamp(5. / -mv.z, 1., 6.);
                 gl_Position = projectionMatrix * mv;

@@ -113,7 +113,7 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
     };
     const WESTMINSTER = [329.6, 261.6, 293.7, 196.0];   // the Japanese school bell
 
-    const state = { phase: 'ready', score: 0, combo: 0, lastBreak: -9, endsAt: 0, broken: 0, materials: new Set(), right: 0, hits: 0, lodges: 0, followThroughs: 0 };
+    const state = { phase: 'intro', dust: 0, score: 0, combo: 0, lastBreak: -9, endsAt: 0, broken: 0, materials: new Set(), right: 0, hits: 0, lodges: 0, followThroughs: 0 };
     const haptic = (i, v, ms) => renderer.xr.getSession()?.inputSources[i]?.gamepad?.hapticActuators?.[0]?.pulse?.(v, ms);
 
     // How the blow lands, not just how fast. The axe wants its edge leading and the wood square-on;
@@ -155,6 +155,7 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
         state.combo = now - state.lastBreak < 2.5 ? state.combo + 1 : 1;
         state.lastBreak = now;
         state.broken++; state.materials.add(target.material);
+        state.dust = Math.min(2.6, state.dust + (target.kind === 'chair' ? 0.12 : 0.3));   // what breaks hangs in the air, and in the light
         const gained = Math.round(target.value * (affinity === 1 ? 1.5 : 1) * Math.min(8, state.combo) * (0.6 + e * 0.5));
         state.score += gained;
         flip();
@@ -220,13 +221,15 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
         renderer.shadowMap.needsUpdate = true;
         for (const pool of Object.values(debris)) { pool.parts.forEach((d, i) => { d.alive = false; pool.mesh.setMatrixAt(i, hidden); }); pool.mesh.instanceMatrix.needsUpdate = true; }
         for (const tool of tools) if (tool.lodged) free(tool, false);
-        Object.assign(state, { phase: 'ready', score: 0, combo: 0, broken: 0, materials: new Set(), right: 0, hits: 0, lodges: 0, followThroughs: 0 });
+        Object.assign(state, { phase: 'ready', dust: 0, score: 0, combo: 0, broken: 0, materials: new Set(), right: 0, hits: 0, lodges: 0, followThroughs: 0 });
         say('TUESDAY (AGAIN). SWING TO START.');
     }
 
     const world = new Vector3(), dir = new Vector3();
     function update(t, dt) {
-        if (!renderer.xr.isPresenting) return;
+        state.dust *= Math.exp(-dt / 35);
+        for (const tool of tools) tool.mesh.visible = state.phase !== 'intro';
+        if (!renderer.xr.isPresenting || state.phase === 'intro') return;
         if (state.phase === 'play' && t > state.endsAt) finish();
         if (state.phase === 'play' && Math.ceil(state.endsAt - t) !== state.shown) { state.shown = Math.ceil(state.endsAt - t); if (state.shown <= 10 || state.shown % 15 === 0) say(`${state.shown}s LEFT  ·  SCORE ${state.score}`); }
         tools.forEach((tool, i) => {
@@ -278,6 +281,5 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
             if (moved) pool.mesh.instanceMatrix.needsUpdate = true;
         }
     }
-    say('LESSON 2: DEMOLITION. SWING TO START.');
     return { update, state, tools, targets, reset, start };
 }

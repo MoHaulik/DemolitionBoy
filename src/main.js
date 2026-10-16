@@ -1,7 +1,7 @@
 // Demolition Boy's classroom. Empty. Mostly. Read the notes, mind the desk that looks back,
 // and whatever you do, do not push the plunger on the teacher's desk.
 import {
-    ACESFilmicToneMapping, AudioListener, BufferGeometry, Color, DirectionalLight, Float32BufferAttribute, Group, HemisphereLight,
+    ACESFilmicToneMapping, AudioListener, BackSide, Mesh, MeshBasicMaterial, SphereGeometry, BufferGeometry, Color, DirectionalLight, Float32BufferAttribute, Group, HemisphereLight,
     Line, LineBasicMaterial, PCFShadowMap, PerspectiveCamera, PMREMGenerator, Points, PointsMaterial, Quaternion, Raycaster, Scene,
     Vector2, Vector3, WebGLRenderer,
 } from 'three';
@@ -53,7 +53,8 @@ sun.shadow.radius = 3;
 scene.add(sun, sun.target);
 const skylight = new DirectionalLight(0xcfdcf2, 1.1);   // the bright sky through the windows: soft, from the left, no shadow
 skylight.position.set(-10, 2.5, 1);
-if (!params.has('sunonly')) scene.add(skylight, new HemisphereLight(0xc9d6ea, 0x6a4024, 0.22));   // ground colour: the sunlit floor bouncing warmth up
+const bounce = new HemisphereLight(0xc9d6ea, 0x6a4024, 0.22);
+if (!params.has('sunonly')) scene.add(skylight, bounce);   // ground colour: the sunlit floor bouncing warmth up
 renderer.shadowMap.needsUpdate = true;
 
 // Sound: everything synthesised. Cicadas outside, a clock ticking the wrong way, and consequences.
@@ -80,7 +81,8 @@ function startAudio() {
     // Cicadas: high noise, pulsed fast, swelling slowly, from the windows.
     const cicadas = at(-W / 2 - 3, 2.5, 0), pulse = new GainNode(ctx, { gain: 0 }), swell = new GainNode(ctx, { gain: 0.05 });
     const hiss = new AudioBufferSourceNode(ctx, { buffer: noise, loop: true });
-    hiss.connect(new BiquadFilterNode(ctx, { type: 'bandpass', frequency: 5200, Q: 3 })).connect(pulse).connect(swell).connect(cicadas);
+    const hush = new GainNode(ctx, { gain: 1 });   // the cicadas go quiet when the swinging starts
+    hiss.connect(new BiquadFilterNode(ctx, { type: 'bandpass', frequency: 5200, Q: 3 })).connect(pulse).connect(swell).connect(hush).connect(cicadas);
     const lfo = new OscillatorNode(ctx, { type: 'square', frequency: 38 }), depth = new GainNode(ctx, { gain: 0.5 });
     lfo.connect(depth).connect(pulse.gain); pulse.gain.value = 0.5;
     const slow = new OscillatorNode(ctx, { frequency: 0.07 }), slowDepth = new GainNode(ctx, { gain: 0.035 });
@@ -88,7 +90,9 @@ function startAudio() {
     hiss.start(); lfo.start(); slow.start();
     const clock = at(1.55, 2.68, -D / 2), desk = at(0.12, 1.3, -3.78), ceiling = at(2.2, H, 1.5), lair = at(room.lair.x, 0.6, room.lair.z);
     audio = {
-        ctx,
+        ctx, hush, out,
+        scratch: () => burst(desk, { dur: 0.05 + Math.random() * 0.05, type: 'bandpass', freq: 2400 + Math.random() * 1500, gain: 0.12, q: 5 }),
+        whistle: () => { tone(out, { from: 500, to: 1500, dur: 0.35, gain: 0.07, type: 'sine' }); setTimeout(() => tone(out, { from: 1500, to: 1400, dur: 0.25, gain: 0.05, type: 'triangle' }), 330); },
         tick: (odd) => burst(clock, { dur: 0.04, type: 'highpass', freq: odd ? 3000 : 2200, gain: 0.25 }),
         click: () => burst(desk, { dur: 0.06, type: 'highpass', freq: 1800, gain: 0.6 }),
         pfft: () => { burst(desk, { dur: 0.7, type: 'bandpass', freq: 1400, to: 300, gain: 0.5, q: 2 }); tone(desk, { from: 700, to: 180, dur: 0.6, gain: 0.08, type: 'triangle' }); },
@@ -159,6 +163,26 @@ function explode() {
     }
 }
 
+// The look. Morten's room as built is an even, sunny afternoon (?look=built). The game plays it as a film frame:
+// one hard warm sun, the fills pulled down and cooled so the shadows go deep and blue, and the beams carry the shot.
+const LOOKS = {
+    built: { sun: 7, sky: 1.1, bounce: 0.22, env: 0.22, exposure: 1.05, haze: 1, skyColor: 0xcfdcf2 },
+    film: { sun: 10, sky: 0.34, bounce: 0.09, env: 0.07, exposure: 1.0, haze: 1.5, skyColor: 0x7f98d6 },
+};
+const builtLook = params.get('look') === 'built';
+const look = { ...(builtLook ? LOOKS.built : LOOKS.film), fill: 1 };   // fill: how much of the fill light is let in (0..1), animated by the opening and the end
+skylight.color.set(look.skyColor);
+function applyLook(target, dt) {
+    const k = 1 - Math.exp(-dt * 1.5);
+    look.fill += (target.fill - look.fill) * k;
+    sun.intensity += (target.sun - sun.intensity) * k;
+    skylight.intensity = look.sky * look.fill;
+    bounce.intensity = look.bounce * look.fill;
+    if (!params.has('sunonly')) scene.environmentIntensity = look.env * look.fill;
+    light.haze.value += (target.haze - light.haze.value) * k;
+}
+if (!params.has('exposure')) renderer.toneMappingExposure = look.exposure;
+
 const game = createGame({ scene, renderer, rig, room, audio: () => audio, say: write, flip: () => { state.flipAt = performance.now() / 1000; } });
 
 // The desk that looks back: blinks now and then, and hides if you stare.
@@ -213,6 +237,34 @@ addEventListener('keydown', (e) => keys.add(e.key.toLowerCase()));
 addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
+// The opening: black, then the room fades up on the held, beautiful frame (sun and beams, almost no fill),
+// the board writes the title in chalk one letter at a time, and only then do the tools turn up.
+const veil = new Mesh(new SphereGeometry(0.3, 16, 8), new MeshBasicMaterial({ color: 0x000000, side: BackSide, transparent: true, depthTest: false, depthWrite: false }));
+veil.renderOrder = 999; veil.visible = false; camera.add(veil);
+const intro = { at: -1, written: 0, lastPhase: null };
+const TITLE = 'DEMOLITION BOY', CUE = 'LESSON 2: DEMOLITION. SWING TO START.';
+function beginOpening() {
+    if (game.state.phase !== 'intro') game.reset();   // a second visit starts clean
+    intro.at = performance.now() / 1000; intro.written = 0;
+    game.state.phase = 'intro';
+    veil.visible = true; veil.material.opacity = 1;
+    write('');
+}
+function opening(t) {
+    if (intro.at < 0) return;
+    const age = t - intro.at;
+    veil.material.opacity = 1 - Math.min(1, Math.max(0, (age - 0.8) / 3.7)) ** 1.6;   // black, then a slow fade up
+    veil.visible = veil.material.opacity > 0.002;
+    const letters = Math.min(TITLE.length, Math.floor(Math.max(0, age - 4.2) / 0.16));   // chalk, letter by letter
+    if (letters > intro.written) { intro.written = letters; write(TITLE.slice(0, letters)); audio?.scratch(); }
+    if (age > 9.5 && game.state.phase === 'intro') {   // the held moment ends with a silly whistle, and the tools are in your hands
+        game.state.phase = 'ready';
+        audio?.whistle();
+        write(CUE);
+        intro.at = -1;
+    }
+}
+
 const head = new Vector3(), forward = new Vector3(), side = new Vector3(), UP = new Vector3(0, 1, 0);
 let then = performance.now(), turned = false, lastTick = 0;
 renderer.setAnimationLoop((now) => {
@@ -264,6 +316,18 @@ renderer.setAnimationLoop((now) => {
     room.flip.rotation.x = flip < 1 ? -flip * Math.PI * 2 : 0;
     updateEyes(t, head);
     game.update(t, dt);
+    opening(t, dt);
+    const phase = game.state.phase;
+    applyLook({
+        fill: builtLook ? 1 : intro.at >= 0 ? 0.3 : phase === 'over' ? 0.45 : 1,   // the held moment and the end are nearly all sun
+        sun: builtLook ? LOOKS.built.sun : phase === 'over' ? 11.5 : look.sun,
+        haze: builtLook ? 1 : (phase === 'intro' ? 1.9 : look.haze) + game.state.dust,
+    }, dt);
+    if (audio && phase !== intro.lastPhase) {
+        intro.lastPhase = phase;
+        const hushTo = phase === 'play' ? 0.05 : 1;   // cicadas fall silent for the demolition, come back after the bell
+        audio.hush.gain.setTargetAtTime(hushTo, audio.ctx.currentTime, phase === 'play' ? 0.3 : 2.5);
+    }
 
     // The clock runs backwards. It is the only honest clock in the building.
     const d = new Date(), sec = d.getSeconds() + d.getMilliseconds() / 1000;
@@ -296,6 +360,7 @@ button.addEventListener('click', async () => {
     startAudio();
     const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'hand-tracking'] });
     await renderer.xr.setSession(session);
+    beginOpening();
     document.body.classList.add('immersive');
     session.addEventListener('end', () => document.body.classList.remove('immersive'));
 });
