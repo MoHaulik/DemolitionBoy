@@ -36,6 +36,20 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     // One tool at a time, in one hand: the axe or the hammer. Squeeze the grip to swap, into whichever hand squeezed.
     const tools = [{ name: 'axe', mesh: axe() }, { name: 'hammer', mesh: hammer() }];
     const grips = [0, 1].map((i) => renderer.xr.getControllerGrip(i));
+    // Where each hand is, controllers or bare hands. three.js only poses the grip for controllers, so for
+    // tracked hands read the hand's own grip space from the frame (the Quest browser provides one).
+    const anchors = [0, 1].map(() => { const a = new Group(); a.matrixAutoUpdate = false; a.visible = false; rig.add(a); return a; });
+    function syncAnchors() {
+        const session = renderer.xr.getSession(), frame = renderer.xr.getFrame(), ref = renderer.xr.getReferenceSpace();
+        anchors.forEach((a, i) => {
+            const source = session?.inputSources[i];
+            const pose = !grips[i].visible && source?.gripSpace && frame && ref ? frame.getPose(source.gripSpace, ref) : null;
+            if (grips[i].visible) a.matrix.copy(grips[i].matrix);
+            else if (pose) a.matrix.fromArray(pose.transform.matrix);
+            a.visible = grips[i].visible || !!pose;
+            a.matrixWorldNeedsUpdate = true;
+        });
+    }
     for (const tool of tools) {
         tool.prev = null; tool.vel = new Vector3(); tool.mesh.visible = false;
         tool.mesh.traverse((o) => { if (o.material?.metalness > 0) { o.material.envMap = scene.environment; o.material.envMapIntensity = 0.9; } });   // steel needs something to reflect, even in a dark room
@@ -46,7 +60,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         if (tools.some((t) => t.lodged)) return;   // pull the axe out first
         for (const t of tools) t.mesh.removeFromParent();
         const tool = tools[index];
-        tool.grip = grips[hand]; tool.hand = hand;
+        tool.grip = anchors[hand]; tool.hand = hand;
         tool.grip.add(tool.mesh);
         tool.mesh.position.set(0, 0, 0); tool.mesh.quaternion.identity(); tool.mesh.rotation.x = TILT;
         tool.prev = null; tool.vel.set(0, 0, 0); tool.follow = null;
@@ -54,7 +68,9 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         holder.tool = index; holder.hand = hand;
         if (state.phase !== 'intro') { sound.swap(); haptic(hand, 0.4, 30); animate(0.25, (f) => tool.mesh.scale.setScalar(0.5 + 0.5 * f + Math.sin(f * Math.PI) * 0.12)); }
     }
-    [0, 1].forEach((i) => renderer.xr.getController(i).addEventListener('squeezestart', () => { if (state.phase !== 'intro') equip(1 - holder.tool, i); }));
+    // Tap to swap: a pinch with bare hands, or the trigger, or the grip, swaps axe and hammer into the hand that did it.
+    const swap = (i) => { if (state.phase !== 'intro') equip(1 - holder.tool, i); };
+    [0, 1].forEach((i) => { const c = renderer.xr.getController(i); c.addEventListener('select', () => swap(i)); c.addEventListener('squeezestart', () => swap(i)); });
     const active = () => tools[holder.tool];
 
     // New things to break, placed where the room had a gap for them.
@@ -500,6 +516,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         const slow = t < state.slowUntil ? 0.15 + 0.85 * ((1.8 - (state.slowUntil - t)) / 1.8) ** 3 : 1;   // the final bell eases time back in
         stepCloud(dust, dt * slow, 0.02); stepCloud(sparks, dt * slow, 6);
         if (t < state.powderUntil) puff(dust, room.ext.position.clone().setY(1.55), 6, { color: 0xffffff, speed: 2.2, size: 0.09, life: 3, grow: 1.4, alpha: 0.35, dir: new Vector3(Math.sin(t * 7) - 0.8, 0.2, Math.cos(t * 5) * 0.8).normalize(), drag: 1.2 });   // the extinguisher, finally used
+        if (renderer.xr.isPresenting) syncAnchors();
         if (!renderer.xr.isPresenting || state.phase === 'intro') return;
         if (state.phase === 'play' && t > state.endsAt) finish();
         if (state.phase === 'play' && Math.ceil(state.endsAt - t) !== state.shown) {
