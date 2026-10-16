@@ -2,11 +2,13 @@
 // Swing speed at contact decides everything: a tap dents, a committed swing sends the room flying.
 import {
     AdditiveBlending, BoxGeometry, BufferGeometry, Color, CylinderGeometry, Float32BufferAttribute, Group, IcosahedronGeometry, InstancedMesh, Matrix4, Mesh,
-    MeshStandardMaterial, NormalBlending, Object3D, PlaneGeometry, PointLight, Points, Quaternion, ShaderMaterial, Vector3,
+    CanvasTexture, MeshBasicMaterial, MeshStandardMaterial, NormalBlending, Object3D, PlaneGeometry, Points, Quaternion, ShaderMaterial, Vector3,
 } from 'three';
 import * as Props from './props.js';
+import { axe, hammer } from './tools.js';
+import { FONTS, letter } from './paint.js';
 
-const ROUND = 90;
+const ROUND = 90, TILT = 0.5;   // TILT: the head tipped up out of the fist
 // Which tool each material wants. The axe cleaves the soft and fibrous; the hammer smashes the hard and brittle.
 const AFFINITY = {
     axe: { wood: 1, drywall: 1, glass: 0.45, ceramic: 0.45, plaster: 0.5, metal: 0.15, slate: 0.1 },
@@ -30,35 +32,30 @@ const QUIPS = {
 const once = { wall: 'WALLS HOLD UP THE CEILING. REMEMBER?', board: 'NO.', hat: 'IT IS A HELMET. THAT IS THE PROBLEM.' };
 const BOARD = ['NO.', 'STILL NO.', 'I AM SLATE. YOU ARE NOT.', 'THE BOARD IS NOT PART OF THE LESSON.', 'DETENTION.'];
 
-function axe() {
-    const g = new Group();
-    const handle = new Mesh(new CylinderGeometry(0.016, 0.02, 0.62, 10), new MeshStandardMaterial({ color: 0xb7834d, roughness: 0.6 }));
-    handle.rotation.x = Math.PI / 2; handle.position.z = -0.22; g.add(handle);
-    const head = new Mesh(new BoxGeometry(0.03, 0.11, 0.09), new MeshStandardMaterial({ color: 0xb3121a, roughness: 0.4, metalness: 0.3 }));
-    head.position.set(0, -0.04, -0.5); g.add(head);
-    const edge = new Mesh(new BoxGeometry(0.012, 0.06, 0.13), new MeshStandardMaterial({ color: 0xe8e8ea, roughness: 0.15, metalness: 1 }));
-    edge.position.set(0, -0.12, -0.5); g.add(edge);
-    g.userData.tip = new Vector3(0, -0.14, -0.5);
-    return g;
-}
-function hammer() {
-    const g = new Group();
-    const handle = new Mesh(new CylinderGeometry(0.017, 0.017, 0.46, 10), new MeshStandardMaterial({ color: 0x1d1d1d, roughness: 0.7 }));
-    handle.rotation.x = Math.PI / 2; handle.position.z = -0.15; g.add(handle);
-    const head = new Mesh(new BoxGeometry(0.075, 0.17, 0.075), new MeshStandardMaterial({ color: 0x3a3d42, roughness: 0.35, metalness: 0.9 }));
-    head.position.set(0, -0.02, -0.38); g.add(head);
-    g.userData.tip = new Vector3(0, -0.1, -0.38);
-    return g;
-}
-
-export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
+export function createGame({ scene, renderer, rig, camera, room, audio, say, flip }) {
+    // One tool at a time, in one hand: the axe or the hammer. Squeeze the grip to swap, into whichever hand squeezed.
     const tools = [{ name: 'axe', mesh: axe() }, { name: 'hammer', mesh: hammer() }];
-    tools.forEach((tool, i) => {
-        tool.mesh.rotation.x = 0.5;   // tilt the head up out of the fist
-        tool.grip = renderer.xr.getControllerGrip(i);
+    const grips = [0, 1].map((i) => renderer.xr.getControllerGrip(i));
+    for (const tool of tools) {
+        tool.prev = null; tool.vel = new Vector3(); tool.mesh.visible = false;
+        tool.mesh.traverse((o) => { if (o.material?.metalness > 0) { o.material.envMap = scene.environment; o.material.envMapIntensity = 0.9; } });   // steel needs something to reflect, even in a dark room
+    }
+    const holder = { tool: 0, hand: null };
+    const rightHand = () => Math.max(0, [...(renderer.xr.getSession()?.inputSources ?? [])].findIndex((s) => s.handedness === 'right'));
+    function equip(index, hand = holder.hand ?? rightHand()) {
+        if (tools.some((t) => t.lodged)) return;   // pull the axe out first
+        for (const t of tools) t.mesh.removeFromParent();
+        const tool = tools[index];
+        tool.grip = grips[hand]; tool.hand = hand;
         tool.grip.add(tool.mesh);
-        tool.prev = null; tool.vel = new Vector3();
-    });
+        tool.mesh.position.set(0, 0, 0); tool.mesh.quaternion.identity(); tool.mesh.rotation.x = TILT;
+        tool.prev = null; tool.vel.set(0, 0, 0); tool.follow = null;
+        tool.settle = performance.now() / 1000 + 0.3;   // a swap is not a swing
+        holder.tool = index; holder.hand = hand;
+        if (state.phase !== 'intro') { sound.swap(); haptic(hand, 0.4, 30); animate(0.25, (f) => tool.mesh.scale.setScalar(0.5 + 0.5 * f + Math.sin(f * Math.PI) * 0.12)); }
+    }
+    [0, 1].forEach((i) => renderer.xr.getController(i).addEventListener('squeezestart', () => { if (state.phase !== 'intro') equip(1 - holder.tool, i); }));
+    const active = () => tools[holder.tool];
 
     // New things to break, placed where the room had a gap for them.
     const back = 4.8, shelf = 1.2125;
@@ -92,8 +89,11 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
     // The hole behind the poster, waiting, and the light that comes through it.
     const holeView = place(Props.hole(), 2.0, 2.0, back - 0.008, Math.PI);
     holeView.visible = false;
-    const daylight = new PointLight(0xffe2b0, 0, 7, 1.6);   // in the scene from the start, dark: adding a light later recompiles every material
-    daylight.position.set(2.0, 2.0, back - 0.6);
+    // No real light for it (a light added mid-game recompiles every material, and one more light costs every pixel on a Quest):
+    // a warm pool spilling across the floor in front of the hole does the job.
+    const daylight = new Mesh(new PlaneGeometry(2.6, 3.4), holeView.userData.halo.material.clone());
+    daylight.material.opacity = 0; daylight.material.color.set(0xffb070);
+    daylight.rotation.x = -Math.PI / 2; daylight.position.set(2.0, 0.008, back - 1.7);
     scene.add(daylight);
     const signHome = room.notAHole[2].position.clone(), signTurn = room.notAHole[2].rotation.clone();
     const extHome = room.ext.rotation.clone(), hatHome = room.hat.position.clone();
@@ -259,11 +259,34 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
         yank() { const c = ctx(); if (!c) return; hiss(c, { dur: 0.22, type: 'bandpass', freq: 1400, to: 380, gain: 0.5, q: 4 }); ping(c, 260, 0.12, 0.4, 0.15); },
         glance() { const c = ctx(); if (!c) return; hiss(c, { dur: 0.18, type: 'bandpass', freq: 2600, to: 1500, gain: 0.3, q: 6 }); },
         tink(material) { const c = ctx(); if (!c) return; ping(c, (material === 'glass' ? 3000 : 2200) + Math.random() * 4000, 0.1, 0.025); },
+        swap() { const c = ctx(); if (!c) return; hiss(c, { dur: 0.16, type: 'bandpass', freq: 800, to: 2400, gain: 0.25, q: 2 }); ping(c, 420, 0.08, 0.15, 0.12, 'triangle'); },
         bell(notes) { const c = ctx(); if (!c) return; notes.forEach((f, k) => { ping(c, f, 1.6, 0.25, k * 0.55); ping(c, f * 2.76, 0.8, 0.05, k * 0.55); }); },
     };
     const WESTMINSTER = [329.6, 261.6, 293.7, 196.0];   // the Japanese school bell
 
-    const fresh = () => ({ dust: 0, score: 0, combo: 0, lastBreak: -9, broken: 0, materials: new Set(), right: 0, hits: 0, lodges: 0, followThroughs: 0, wrong: {}, said: new Set(), boardHits: 0, powderUntil: 0 });
+    // Masking tape round the handle above the fist: time left, where your eyes already are.
+    const writeTag = (text, hot) => { for (const tool of tools) tool.mesh.userData.band(text, hot); };
+    writeTag('1:30');
+
+    // The report card: after the bell, a sheet of school stationery floats up in front of you.
+    const report = new Mesh(new PlaneGeometry(0.42, 0.56), new MeshBasicMaterial({ transparent: true, opacity: 0, side: 2, toneMapped: false }));   // paper white, not graded with the room
+    report.visible = false;
+    scene.add(report);
+    function showReport(total, kinds, grade) {
+        const pct = state.hits ? Math.round(state.right / state.hits * 100) : 0;
+        const comment = total > 30000 ? 'Your child has demolished the classroom, the corridor and, we suspect, the concept of school.' : total > 15000 ? 'Shows real promise. The school does not.' : total > 5000 ? 'Tries hard. Breaks things. Could break more things.' : 'Your child was gentle with the furniture. We are worried.';
+        report.material.map?.dispose();
+        report.material.map = letter('REPORT CARD: DEMOLITION', `Score: ${total}\nMaterials broken: ${kinds} of 6\nThings destroyed: ${state.broken}\nRight tool for the job: ${pct}%\nFollow-through: ${state.followThroughs} swings\nBest combo: x${state.bestCombo}\n\nGRADE: ${grade.split('.')[0]}\n\nTeacher's comment: ${comment}\n\nSwing hard to stay after class (again).`);
+        report.material.needsUpdate = true;
+        const head = camera.getWorldPosition(new Vector3()), ahead = camera.getWorldDirection(new Vector3()).setY(0).normalize();
+        report.position.copy(head).addScaledVector(ahead, 0.75).setY(head.y - 0.12);
+        report.lookAt(head.x, report.position.y, head.z);
+        report.visible = true;
+        const y0 = report.position.y;
+        animate(1.2, (f) => { report.material.opacity = f; report.position.y = y0 - 0.15 * (1 - f) ** 2; });
+    }
+
+    const fresh = () => ({ bestCombo: 0, slowUntil: 0, dust: 0, score: 0, combo: 0, lastBreak: -9, broken: 0, materials: new Set(), right: 0, hits: 0, lodges: 0, followThroughs: 0, wrong: {}, said: new Set(), boardHits: 0, powderUntil: 0 });
     const state = { phase: 'intro', endsAt: 0, ...fresh() };
     const haptic = (i, v, ms) => renderer.xr.getSession()?.inputSources[i]?.gamepad?.hapticActuators?.[0]?.pulse?.(v, ms);
     const anims = [];
@@ -346,6 +369,7 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
         if (target.kind === 'drywall') reveal();
         if (target.kind === 'ext') { sound.powder(); state.powderUntil = now + 2.6; const ext = room.ext; animate(0.5, (f) => { ext.rotation.z = extHome.z + f * 0.5; ext.rotation.x = extHome.x - f * 0.2; }); }
         state.combo = now - state.lastBreak < 2.5 ? state.combo + 1 : 1;
+        state.bestCombo = Math.max(state.bestCombo, state.combo);
         state.lastBreak = now;
         state.broken++; state.materials.add(target.material);
         state.dust = Math.min(2.6, state.dust + (target.kind === 'chair' ? 0.12 : 0.3));   // what breaks hangs in the air, and in the light
@@ -363,7 +387,7 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
         cracks.visible = glow.visible = false;
         holeView.visible = true;
         animate(1.1, (f) => { sign.position.set(signHome.x, signHome.y - (signHome.y - 0.05) * f * f, signHome.z - 0.25 * f); sign.rotation.set(-Math.PI / 2 * f * f, signTurn.y, signTurn.z + f * 0.6, 'YXZ'); });
-        animate(1.5, (f) => { daylight.intensity = 5 * Math.min(1, f * 2) * (1 - 0.3 * f); holeView.userData.halo.material.opacity = 0.4 + 0.6 * f; });
+        animate(1.5, (f) => { daylight.material.opacity = 0.55 * f; holeView.userData.halo.material.opacity = 0.4 + 0.6 * f; });
     }
 
     function lodge(tool, i, target, point, dir, now) {
@@ -383,7 +407,7 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
     function free(tool, yanked, i = 0, now = 0) {
         const { pivot, target } = tool.lodged;
         tool.grip.attach(tool.mesh);
-        tool.mesh.position.set(0, 0, 0); tool.mesh.quaternion.identity(); tool.mesh.rotation.set(0.5, 0, 0);
+        tool.mesh.position.set(0, 0, 0); tool.mesh.quaternion.identity(); tool.mesh.rotation.set(TILT, 0, 0);
         scene.remove(pivot);
         tool.lodged = null; tool.prev = null; tool.vel.set(0, 0, 0);
         if (!yanked) return;
@@ -407,6 +431,7 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
 
     function start(now) {
         state.phase = 'play'; state.endsAt = now + ROUND;
+        report.visible = false;
         sound.bell(WESTMINSTER);
         say('LESSON 2: DEMOLITION. 90 SECONDS. GO.');
     }
@@ -418,6 +443,9 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
         say(`PENCILS DOWN. ${total} PTS, ${kinds}/6 MATERIALS. ${grade}`);
         state.total = total;
         state.finishedAt = performance.now() / 1000;
+        state.slowUntil = state.finishedAt + 1.8;   // the bell: everything in the air hangs for a moment
+        writeTag('0:00', true);
+        setTimeout(() => state.phase === 'over' && showReport(total, kinds, grade), 2200);
     }
     function reset() {
         for (const t of targets) { t.hp = t.max; if (t.mesh) t.mesh.setMatrixAt(t.index, t.matrix); if (t.pane) t.pane.visible = true; if (t.object) t.object.visible = true; }
@@ -429,10 +457,11 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
         for (const tool of tools) if (tool.lodged) free(tool, false);
         const [cracks, glow, sign] = room.notAHole;
         cracks.visible = glow.visible = true; sign.position.copy(signHome); sign.rotation.copy(signTurn);
-        holeView.visible = false; daylight.intensity = 0;
+        holeView.visible = false; daylight.material.opacity = 0; report.visible = false;
         room.ext.rotation.copy(extHome); room.hat.position.copy(hatHome);
         anims.length = 0;
         Object.assign(state, { phase: 'ready', ...fresh() });
+        writeTag('1:30');
         say('TUESDAY (AGAIN). SWING TO START.');
     }
 
@@ -466,15 +495,24 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
     const world = new Vector3(), dir = new Vector3(), heads = tools.map(() => ({ p: new Vector3(), speed: 0 }));
     function update(t, dt) {
         state.dust *= Math.exp(-dt / 35);
-        for (const tool of tools) tool.mesh.visible = state.phase !== 'intro';
+        for (const tool of tools) tool.mesh.visible = state.phase !== 'intro' && (tool === active() || !!tool.lodged);
         for (let i = anims.length - 1; i >= 0; i--) { const a = anims[i]; a.t += dt; const f = Math.min(1, a.t / a.dur); a.run(f); if (f === 1) { anims.splice(i, 1); a.done?.(); } }
-        stepCloud(dust, dt, 0.02); stepCloud(sparks, dt, 6);
+        const slow = t < state.slowUntil ? 0.15 + 0.85 * ((1.8 - (state.slowUntil - t)) / 1.8) ** 3 : 1;   // the final bell eases time back in
+        stepCloud(dust, dt * slow, 0.02); stepCloud(sparks, dt * slow, 6);
         if (t < state.powderUntil) puff(dust, room.ext.position.clone().setY(1.55), 6, { color: 0xffffff, speed: 2.2, size: 0.09, life: 3, grow: 1.4, alpha: 0.35, dir: new Vector3(Math.sin(t * 7) - 0.8, 0.2, Math.cos(t * 5) * 0.8).normalize(), drag: 1.2 });   // the extinguisher, finally used
         if (!renderer.xr.isPresenting || state.phase === 'intro') return;
         if (state.phase === 'play' && t > state.endsAt) finish();
-        if (state.phase === 'play' && Math.ceil(state.endsAt - t) !== state.shown) { state.shown = Math.ceil(state.endsAt - t); if (state.shown <= 10 || state.shown % 15 === 0) say(`${state.shown}s LEFT  ·  SCORE ${state.score}`); }
-        tools.forEach((tool, i) => {
-            heads[i].speed = 0;
+        if (state.phase === 'play' && Math.ceil(state.endsAt - t) !== state.shown) {
+            state.shown = Math.ceil(state.endsAt - t);
+            writeTag(`${Math.floor(state.shown / 60)}:${String(state.shown % 60).padStart(2, '0')}`, state.shown <= 10);
+            if (state.shown <= 10 || state.shown % 15 === 0) say(`${state.shown}s LEFT  ·  SCORE ${state.score}`);
+            if (state.shown <= 10 && ctx()) { ping(ctx(), state.shown <= 3 ? 1900 : 1500, 0.06, 0.25, 0, 'square'); haptic(1, 0.15, 15); }   // the last ten seconds tick, loud, in the hand
+        }
+        for (const h of heads) h.speed = 0;
+        if (holder.hand === null) equip(0);
+        tools.forEach((tool) => {
+            const i = tool.hand ?? 0;
+            if (tool !== active() && !tool.lodged) return;
             if (!tool.grip.visible) { tool.prev = null; return; }
             if (tool.lodged) {   // the handle quivers, and the hand has to pull it free
                 const l = tool.lodged, age = t - l.at;
@@ -488,7 +526,8 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
             if (tool.prev && dt > 0) tool.vel.lerp(dir.subVectors(world, tool.prev).divideScalar(dt), 0.6);
             tool.prev = (tool.prev ?? new Vector3()).copy(world);
             const speed = tool.vel.length();
-            heads[i].p.copy(world); heads[i].speed = speed;
+            if (t < (tool.settle ?? 0)) { tool.vel.set(0, 0, 0); return; }
+            heads[0].p.copy(world); heads[0].speed = speed;
             if (speed < 1.2) return;   // resting, or a gentle touch
             kick(world, tool.vel);
             if (state.phase === 'ready') start(t);
@@ -510,7 +549,7 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
             target.mesh.setMatrixAt(target.index, m); target.mesh.instanceMatrix.needsUpdate = true;
             target.shove.multiplyScalar(0.8); if (target.shove.lengthSq() < 1e-7) target.shove = null;
         }
-        stepDebris(dt);
+        stepDebris(dt * slow);
     }
 
     // A swinging tool bats loose debris out of the way.
@@ -547,5 +586,5 @@ export function createGame({ scene, renderer, rig, room, audio, say, flip }) {
             if (moved) pool.mesh.instanceMatrix.needsUpdate = true;
         }
     }
-    return { update, state, tools, targets, props, reset, start };
+    return { update, state, tools, targets, props, reset, start, finish, equip, holder, hole: holeView, report };
 }

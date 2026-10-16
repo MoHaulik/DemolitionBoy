@@ -183,7 +183,7 @@ function applyLook(target, dt) {
 }
 if (!params.has('exposure')) renderer.toneMappingExposure = look.exposure;
 
-const game = createGame({ scene, renderer, rig, room, audio: () => audio, say: write, flip: () => { state.flipAt = performance.now() / 1000; } });
+const game = createGame({ scene, renderer, rig, camera, room, audio: () => audio, say: write, flip: () => { state.flipAt = performance.now() / 1000; } });
 
 // The desk that looks back: blinks now and then, and hides if you stare.
 function updateEyes(t, head) {
