@@ -8,7 +8,7 @@ import * as Props from './props.js';
 import { axe, hammer } from './tools.js';
 import { FONTS, letter } from './paint.js';
 
-const ROUND = 90, TILT = 0.5;   // TILT: the head tipped up out of the fist
+const ROUND = 90, TILT = 0;   // TILT: extra tip of the head out of the fist (the grip pose already holds it upright)
 // Which tool each material wants. The axe cleaves the soft and fibrous; the hammer smashes the hard and brittle.
 const AFFINITY = {
     axe: { wood: 1, drywall: 1, glass: 0.45, ceramic: 0.45, plaster: 0.5, metal: 0.15, slate: 0.1 },
@@ -39,16 +39,62 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     // Where each hand is, controllers or bare hands. three.js only poses the grip for controllers, so for
     // tracked hands read the hand's own grip space from the frame (the Quest browser provides one).
     const anchors = [0, 1].map(() => { const a = new Group(); a.matrixAutoUpdate = false; a.visible = false; rig.add(a); return a; });
+    // With bare hands the grip is built from the hand's bones, so the tool sits in a closed fist the way a real
+    // one does: the handle comes up out of the thumb side, the edge (or the hammer's face) faces where the knuckles point.
+    const jm = new Matrix4(), jx = new Vector3(), jy = new Vector3(), jz = new Vector3(), jp = new Vector3(), up = new Vector3(), fwd = new Vector3(), side = new Vector3();
+    function fist(source, frame, ref, out) {
+        const bone = source.hand?.get('middle-finger-metacarpal'), pose = bone && frame.getJointPose?.(bone, ref);
+        if (!pose) return false;
+        jm.fromArray(pose.transform.matrix).extractBasis(jx, jy, jz);
+        jp.setFromMatrixPosition(jm).addScaledVector(jy, -0.03).addScaledVector(jz, -0.02);   // into the palm, towards the fingers: the middle of the fist
+        up.copy(jx).multiplyScalar(source.handedness === 'left' ? 1 : -1).addScaledVector(jz, -0.25).normalize();   // thumb side, leaning a little forward
+        fwd.copy(jz).negate().addScaledVector(up, -jz.clone().negate().dot(up)).normalize();   // the knuckles' way, square to the handle
+        side.crossVectors(fwd, up);   // tool X = E x H
+        out.makeBasis(side, fwd.negate(), up.negate()).setPosition(jp);   // tool -Y = knuckles, tool -Z = handle
+        return true;
+    }
     function syncAnchors() {
         const session = renderer.xr.getSession(), frame = renderer.xr.getFrame(), ref = renderer.xr.getReferenceSpace();
         anchors.forEach((a, i) => {
             const source = session?.inputSources[i];
-            const pose = !grips[i].visible && source?.gripSpace && frame && ref ? frame.getPose(source.gripSpace, ref) : null;
-            if (grips[i].visible) a.matrix.copy(grips[i].matrix);
-            else if (pose) a.matrix.fromArray(pose.transform.matrix);
-            a.visible = grips[i].visible || !!pose;
+            let ok = grips[i].visible;
+            if (ok) a.matrix.copy(grips[i].matrix);
+            else if (source && frame && ref) {
+                ok = fist(source, frame, ref, a.matrix);
+                const pose = !ok && source.gripSpace ? frame.getPose(source.gripSpace, ref) : null;
+                if (pose) { a.matrix.fromArray(pose.transform.matrix); ok = true; }
+            }
+            a.visible = ok;
             a.matrixWorldNeedsUpdate = true;
         });
+    }
+
+    // Walking, from Goats (goat5): swing your free arm to go, look where you want to go. How hard you swing, measured
+    // relative to your own body, pushes you along your gaze; momentum carries between swings and friction bleeds it off.
+    // Same model, a classroom's pace: a top speed of 1.4 m/s against the goat's 9.5. The hand holding the tool doesn't
+    // walk you, or every chop would carry you into the desk.
+    const WALK = { min: 0.6, max: 6, push: 1.1, top: 1.4, damping: 0.965 };
+    const walk = { v: new Vector3(), last: [null, null], hand: new Vector3(), look: new Vector3(), head: new Vector3() };
+    function locomote(dt) {
+        const free = holder.hand === null ? -1 : 1 - holder.hand;
+        camera.getWorldDirection(walk.look).setY(0).normalize();
+        anchors.forEach((a, i) => {
+            if (!a.visible) { walk.last[i] = null; return; }
+            walk.hand.setFromMatrixPosition(a.matrix);   // rig-local: your own moving body doesn't read as a swing
+            if (walk.last[i] && dt > 0 && i === free && !tools.some((t) => t.lodged && t.hand === i)) {
+                const speed = walk.hand.distanceTo(walk.last[i]) / dt;
+                if (speed > WALK.min) walk.v.addScaledVector(walk.look, Math.min(speed, WALK.max) * WALK.push * dt);
+            }
+            (walk.last[i] ??= new Vector3()).copy(walk.hand);
+        });
+        if (walk.v.length() > WALK.top) walk.v.setLength(WALK.top);
+        walk.v.multiplyScalar(Math.pow(WALK.damping, dt * 60));
+        rig.position.addScaledVector(walk.v, dt);
+        camera.getWorldPosition(walk.head);   // stay in the room
+        const offX = walk.head.x - rig.position.x, offZ = walk.head.z - rig.position.z;
+        rig.position.x = Math.min(4.5 - 0.35, Math.max(-4.5 + 0.35, rig.position.x + offX)) - offX;
+        rig.position.z = Math.min(4.8 - 0.35, Math.max(-4.8 + 0.9, rig.position.z + offZ)) - offZ;
+        state.speed = walk.v.length();
     }
     for (const tool of tools) {
         tool.prev = null; tool.vel = new Vector3(); tool.mesh.visible = false;
@@ -518,6 +564,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         if (t < state.powderUntil) puff(dust, room.ext.position.clone().setY(1.55), 6, { color: 0xffffff, speed: 2.2, size: 0.09, life: 3, grow: 1.4, alpha: 0.35, dir: new Vector3(Math.sin(t * 7) - 0.8, 0.2, Math.cos(t * 5) * 0.8).normalize(), drag: 1.2 });   // the extinguisher, finally used
         if (renderer.xr.isPresenting) syncAnchors();
         if (!renderer.xr.isPresenting || state.phase === 'intro') return;
+        locomote(dt);
         if (state.phase === 'play' && t > state.endsAt) finish();
         if (state.phase === 'play' && Math.ceil(state.endsAt - t) !== state.shown) {
             state.shown = Math.ceil(state.endsAt - t);

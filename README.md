@@ -5,6 +5,7 @@ First-person, two-handed demolition in WebXR for Meta Quest 3: an axe in one han
 **Play:** open the GitHub Pages URL of this repo in the Quest browser and press *Enter the classroom*.
 
 - **Works with bare hands** (Quest hand tracking) or controllers.
+- **Walk** by swinging your free arm (the one without a tool), like in Goats: swing to go, look where you want to go. With controllers the left stick walks too.
 - **One tool at a time.** You start with the **axe** in your right hand. **Tap** (pinch your fingers, or pull the trigger) to swap to the **hammer** and back, into whichever hand tapped.
 - The **axe** cleaves wood (desks, chairs) and drywall. Lead with the edge and hit square-on; a good chop bites in and sticks. Pull your hand away to wrench it free.
 - The **hammer** smashes glass, pottery and plaster: windows, pots, vases, the lucky cat, the Principal's bust, the volcano, the walls.
