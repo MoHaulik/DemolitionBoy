@@ -233,9 +233,10 @@ export function buildRoom(scene, { cjk }) {
     const brim = new Mesh(new CylinderGeometry(0.16, 0.16, 0.012, 24), hat.material); brim.position.y = 0.006; hat.add(brim);
     scene.add(hat);
     note('Property of D.B. NOT a helmet for indoor use. (It is. That is the problem.)', 'yellow', -2.2, 1.38, back - 0.006, Math.PI, 0.1, 36);
-    decal(P.cracks(), 2.2, 2.2, 2.0, 2.0, back - 0.004, { ry: Math.PI });
-    decal(P.glow(), 1.25, 0.85, 2.03, 1.98, back - 0.007, { ry: Math.PI, lit: false, blend: AdditiveBlending }).material.color.set(0x8a6a44);   // daylight round the edges
-    decal(P.sign('FACILITY MANAGEMENT', 'THIS IS NOT A HOLE.', { bar: '#1f3d7a', size: 92, h: 640, foot: 'please stop asking' }), 1.05, 0.66, 2.0, 2.0, back - 0.012, { ry: Math.PI, rz: -0.04 });
+    const notAHole = [decal(P.cracks(), 2.2, 2.2, 2.0, 2.0, back - 0.004, { ry: Math.PI })];
+    notAHole.push(decal(P.glow(), 1.25, 0.85, 2.03, 1.98, back - 0.007, { ry: Math.PI, lit: false, blend: AdditiveBlending }));
+    notAHole[1].material.color.set(0x8a6a44);   // daylight round the edges
+    notAHole.push(decal(P.sign('FACILITY MANAGEMENT', 'THIS IS NOT A HOLE.', { bar: '#1f3d7a', size: 92, h: 640, foot: 'please stop asking' }), 1.05, 0.66, 2.0, 2.0, back - 0.012, { ry: Math.PI, rz: -0.04 }));
     decal(P.sign('SCIENCE FAIR', "2nd PLACE: 'Volcano'", { bar: '#1d7a3a', size: 74, foot: 'judges were evacuated' }), 0.5, 0.25, 0.4, 1.75, back - 0.006, { ry: Math.PI, rz: 0.05 });
     const ext = new Mesh(new CylinderGeometry(0.075, 0.075, 0.5, 24), new MeshStandardMaterial({ color: 0xb3121a, roughness: 0.35, metalness: 0.1 }));
     ext.position.set(W / 2 - 0.18, 1.25, back - 0.6); ext.castShadow = true; scene.add(ext);
@@ -260,7 +261,7 @@ export function buildRoom(scene, { cjk }) {
     decal(P.scorch(), 1.8, 1.8, 2.3, H - 0.004, 1.5, { rx: Math.PI / 2, rz: 1.1 });
 
     bake(scene);
-    return { M, seats, desks, chairs, glass: panes, board, status, statusCanvas, scrolls, flip, card, hands, plunger, handle, eyes, lair, crooked, hat };
+    return { M, seats, desks, chairs, glass: panes, board, status, statusCanvas, scrolls, flip, card, hands, plunger, handle, eyes, lair, crooked, hat, ext, notAHole };
 }
 
 /** Merge every static box that shares a material into one mesh: a few draw calls instead of hundreds. */
