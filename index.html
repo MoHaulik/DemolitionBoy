@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Demolition Boy: The Classroom | NXT/WebXR</title>
+<meta name="description" content="Step into Demolition Boy's classroom in your WebXR headset: an old wooden schoolroom full of notes, warnings and evidence. Do not push the plunger.">
+<link rel="canonical" href="https://www.nxtwebxr.com/demolitionboy/">
+<link rel="icon" href="data:," type="image/svg+xml">
+<meta property="og:title" content="Demolition Boy: The Classroom | NXT/WebXR">
+<meta property="og:description" content="His classroom. Empty. Mostly. Do not push the plunger.">
+<meta property="og:url" content="https://www.nxtwebxr.com/demolitionboy/">
+<meta property="og:image" content="https://www.nxtwebxr.com/og-image.jpg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cabin+Sketch:wght@700&family=Caveat:wght@600&family=Permanent+Marker&family=Special+Elite&display=block">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Yuji+Syuku&display=block&text=%E5%A3%8A%E3%81%99%E3%81%AA%E6%9F%B1%E3%81%AF%E5%8F%8B%E9%81%94%E7%88%86%E7%99%BA%E7%A6%81%E6%AD%A2%E5%BB%8A%E4%B8%8B%E3%82%92%E8%B5%B0%E3%82%8B">
+<style>
+:root { --ink: #f4efe2; --glass: rgba(24, 18, 12, .62); --accent: #f2c418; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2119; color: var(--ink); font: 16px/1.45 system-ui, -apple-system, sans-serif; }
+canvas { display: block; touch-action: none; cursor: grab; }
+#ui { position: fixed; left: 16px; bottom: 16px; max-width: min(430px, calc(100vw - 32px)); padding: 18px 20px; box-sizing: border-box; border-radius: 18px; background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+h1 { margin: 0 0 4px; font: 400 30px "Permanent Marker", system-ui, sans-serif; letter-spacing: .02em; color: var(--accent); }
+p { margin: 0 0 14px; opacity: .92; }
+small { display: block; margin-top: 10px; opacity: .7; }
+button { font: 700 16px system-ui, sans-serif; color: #1d1608; background: var(--accent); border: 0; border-radius: 999px; padding: 12px 22px; cursor: pointer; }
+button:disabled { cursor: default; opacity: .75; }
+a { color: var(--accent); }
+.immersive #ui { display: none; }
+</style>
+</head>
+<body>
+<div id="ui">
+<h1>Demolition Boy</h1>
+<p>His classroom. Empty. Mostly. Read the notes, mind the desk that looks back, and do not push the plunger on the teacher's desk.</p>
+<button id="enter" disabled>Sweeping up the classroom…</button>
+<small>Drag to look around, WASD to walk, click to touch things you shouldn't. <a href="https://www.nxtwebxr.com/">More WebXR experiences</a></small>
+</div>
+<script type="module" src="./demolitionboy.js"></script>
+</body>
+</html>
