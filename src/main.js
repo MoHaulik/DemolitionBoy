@@ -9,6 +9,8 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { buildLight, buildRoom, D, H, SUN, W } from './room.js';
 import { chalkLine, FONTS, hasGlyphs } from './paint.js';
 import { createGame } from './game.js';
+import { createPhysics } from './physics.js';
+import { createDestruction } from './destruction.js';
 
 const params = new URLSearchParams(location.search);
 const button = document.getElementById('enter');
@@ -42,6 +44,8 @@ scene.add(rig);
 
 const room = buildRoom(scene, { cjk: hasGlyphs('壊', FONTS.brush) });
 const light = buildLight(scene);
+const physics = await createPhysics();   // every wall, pane and desk is a body now
+const destruction = createDestruction({ scene, physics, room });
 const sun = new DirectionalLight(0xffd9a6, 7);
 sun.position.copy(SUN).multiplyScalar(14);
 sun.castShadow = true;
@@ -183,7 +187,7 @@ function applyLook(target, dt) {
 }
 if (!params.has('exposure')) renderer.toneMappingExposure = look.exposure;
 
-const game = createGame({ scene, renderer, rig, camera, room, audio: () => audio, say: write, flip: () => { state.flipAt = performance.now() / 1000; } });
+const game = createGame({ scene, renderer, rig, camera, room, physics, destruction, audio: () => audio, say: write, flip: () => { state.flipAt = performance.now() / 1000; } });
 
 // The desk that looks back: blinks now and then, and hides if you stare.
 function updateEyes(t, head) {
@@ -364,4 +368,4 @@ button.addEventListener('click', async () => {
     document.body.classList.add('immersive');
     session.addEventListener('end', () => document.body.classList.remove('immersive'));
 });
-Object.assign(globalThis, { classroom: { renderer, scene, camera, rig, room, state, push, game } });   // for the console and tests
+Object.assign(globalThis, { classroom: { renderer, scene, camera, rig, room, state, push, game, physics, destruction } });   // for the console and tests

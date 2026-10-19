@@ -5,22 +5,30 @@ import {
     CanvasTexture, MeshBasicMaterial, MeshStandardMaterial, NormalBlending, Object3D, PlaneGeometry, Points, Quaternion, ShaderMaterial, Vector3,
 } from 'three';
 import * as Props from './props.js';
+import { ConeGeometry, SphereGeometry } from 'three';
 import { axe, hammer } from './tools.js';
 import { FONTS, letter } from './paint.js';
 
-const ROUND = 90, TILT = 0;   // TILT: extra tip of the head out of the fist (the grip pose already holds it upright)
+const ROUND = 90, TILT = 0, TOOL_MASS = { axe: 1.8, hammer: 4.5 };   // kg: what a blow carries into what it hits   // TILT: extra tip of the head out of the fist (the grip pose already holds it upright)
 // Which tool each material wants. The axe cleaves the soft and fibrous; the hammer smashes the hard and brittle.
 const AFFINITY = {
-    axe: { wood: 1, drywall: 1, glass: 0.45, ceramic: 0.45, plaster: 0.5, metal: 0.15, slate: 0.1 },
-    hammer: { wood: 0.5, drywall: 0.6, glass: 1, ceramic: 1, plaster: 1, metal: 0.15, slate: 0.1 },
+    axe: { wood: 1, glass: 0.45, ceramic: 0.45, plaster: 0.55, slate: 0.4, metal: 0.15, paper: 1 },
+    hammer: { wood: 0.5, glass: 1, ceramic: 1, plaster: 1, slate: 1, metal: 0.15, paper: 0.3 },
 };
-const MATERIALS = ['wood', 'glass', 'ceramic', 'plaster', 'drywall', 'metal'];
+const MATERIALS = ['wood', 'glass', 'ceramic', 'plaster', 'slate', 'metal'];
 // When the wrong tool keeps bouncing off, the board says so. That is the whole tutorial.
-const HINTS = { glass: 'GLASS PREFERS A HAMMER. SO DO I.', ceramic: 'POTTERY WANTS THE HAMMER.', plaster: 'PLASTER WANTS THE HAMMER. TRUST ME.', wood: 'WOOD WANTS THE AXE.', drywall: 'DRYWALL WANTS THE AXE.' };
+const HINTS = { glass: 'GLASS PREFERS A HAMMER. SO DO I.', ceramic: 'POTTERY WANTS THE HAMMER.', plaster: 'PLASTER WANTS THE HAMMER. TRUST ME.', wood: 'WOOD WANTS THE AXE.', slate: 'SLATE WANTS THE HAMMER. I WOULD KNOW.' };
 const QUIPS = {
     desk: ['THAT DESK WAS NEW.', 'IT WAS REPLACED 14 TIMES. NOW 15.', 'SPLINTERS. EVERYWHERE.'],
     chair: ['SIT DOWN. OH.', 'THAT CHAIR HAD A FAMILY.'],
-    window: ['THAT WINDOW HAS NOW BEEN TESTED. FROM BOTH SIDES.', 'FRESH AIR!', 'VENTILATION: IMPROVED.'],
+    pane: ['THAT WINDOW HAS NOW BEEN TESTED. FROM BOTH SIDES.', 'FRESH AIR!', 'VENTILATION: IMPROVED.'],
+    wall: ['WALLS HOLD UP THE CEILING. REMEMBER?', 'THAT WALL WAS LOAD-BEARING. PROBABLY.', 'YOU CAN SEE THE PARK NOW.'],
+    board: ['NO.', 'NOT THE BOARD.', 'I AM SLATE. I AM ALSO NOW GRAVEL.'],
+    lectern: ["THE TEACHER'S DESK. OH NO."],
+    door: ['THE DOOR WAS OPEN.'],
+    speaker: ['THIS WAS NOT AN ANNOUNCEMENT.'],
+    post: ['THE WINDOWS ARE NOW ONE WINDOW.'],
+    shelf: ['THE BOOKS ARE FREE.'],
     pot: ['THE PLANT IS FINE. THE PLANT IS NOT FINE.', 'IT WAS A CACTUS. EMOTIONALLY.'],
     vase: ['A VASE. FROM A TRIP. NOBODY REMEMBERS THE TRIP.', 'MING DYNASTY. (IT WAS NOT.)'],
     cat: ['THERE GOES OUR LUCK.'],
@@ -29,10 +37,10 @@ const QUIPS = {
     drywall: ['OK. IT WAS A HOLE.'],
     ext: ['USE BEFORE. NOT AFTER.'],
 };
-const once = { wall: 'WALLS HOLD UP THE CEILING. REMEMBER?', board: 'NO.', hat: 'IT IS A HELMET. THAT IS THE PROBLEM.' };
-const BOARD = ['NO.', 'STILL NO.', 'I AM SLATE. YOU ARE NOT.', 'THE BOARD IS NOT PART OF THE LESSON.', 'DETENTION.'];
+// What a break is worth: by kind, and by how much of it there was.
+const VALUE = { wall: 260, board: 500, pane: 220, trim: 60, post: 320, door: 300, lectern: 900, speaker: 300, shelf: 80, frame: 160, fragment: 30, shard: 15, board_: 0, desk: 420, chair: 160, pot: 350, vase: 400, cat: 900, bust: 1200, volcano: 800, ext: 700 };
 
-export function createGame({ scene, renderer, rig, camera, room, audio, say, flip }) {
+export function createGame({ scene, renderer, rig, camera, room, audio, say, flip, physics, destruction }) {
     // One tool at a time, in one hand: the axe or the hammer. Squeeze the grip to swap, into whichever hand squeezed.
     const tools = [{ name: 'axe', mesh: axe() }, { name: 'hammer', mesh: hammer() }];
     const grips = [0, 1].map((i) => renderer.xr.getControllerGrip(i));
@@ -119,80 +127,70 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     [0, 1].forEach((i) => { const c = renderer.xr.getController(i); c.addEventListener('select', () => swap(i)); c.addEventListener('squeezestart', () => swap(i)); });
     const active = () => tools[holder.tool];
 
-    // New things to break, placed where the room had a gap for them.
-    const back = 4.8, shelf = 1.2125;
+    // New things to break, placed where the room had a gap for them, each a rigid body: knock them off, they fall, they break.
+    const back = 4.8, shelf = 1.2125, { RAPIER, world: physicsWorld } = physics;
     const place = (object, x, y, z, ry = 0) => { object.position.set(x, y, z); object.rotation.y = ry; scene.add(object); return object; };
+    const lathe = (r, h) => (s) => new CylinderGeometry(s.x * r, s.x * 0.42, s.y * h, 16, 3);
     const props = [
-        ...[-2.1, 0, 2.1].map((z) => ({ kind: 'pot', material: 'ceramic', hp: 0.35, object: place(Props.pot(), -4.42, 0.945, z), half: [0.09, 0.14, 0.09], up: 0.12, value: 350, colors: [0xb5562f, 0x9a4626, 0x3a2414] })),
-        { kind: 'vase', material: 'ceramic', hp: 0.3, object: place(Props.vase(), -3.0, shelf, back - 0.2), half: [0.09, 0.14, 0.09], up: 0.12, value: 400, colors: [0xf4f1ea, 0x2b4f9a] },
-        { kind: 'vase', material: 'ceramic', hp: 0.3, object: place(Props.vase(0x9a2b2b), 3.15, shelf, back - 0.2), half: [0.09, 0.14, 0.09], up: 0.12, value: 400, colors: [0xf4f1ea, 0x9a2b2b] },
-        { kind: 'cat', material: 'ceramic', hp: 0.3, object: place(Props.luckyCat(), 1.2, shelf, back - 0.22, Math.PI), half: [0.1, 0.15, 0.1], up: 0.14, value: 900, colors: [0xf7f3ea, 0xc8282c, 0xe2b23c] },
-        { kind: 'bust', material: 'plaster', hp: 0.9, object: place(Props.bust(), -0.9, shelf, back - 0.2, Math.PI), half: [0.14, 0.17, 0.12], up: 0.16, value: 1200, colors: [0xe8e2d4, 0xd5cebf] },
-        { kind: 'volcano', material: 'plaster', hp: 0.7, object: place(Props.volcano(), 0.4, shelf, back - 0.22), half: [0.2, 0.13, 0.2], up: 0.12, value: 800, colors: [0x8a6b55, 0xd9481c] },
+        ...[-2.1, 0, 2.1].map((z) => destruction.addProp(place(Props.pot(), -4.42, 0.95, z), { kind: 'pot', material: 'ceramic', mass: 1.2, hp: 0.3, brittle: 25, colors: [0xb5562f, 0x9a4626], inside: 0xd9a27a, proxy: lathe(0.42, 0.55) })),
+        destruction.addProp(place(Props.vase(), -3.0, shelf + 0.005, back - 0.2), { kind: 'vase', material: 'ceramic', mass: 0.8, hp: 0.25, brittle: 18, colors: [0xf4f1ea, 0x2b4f9a], proxy: lathe(0.4, 1) }),
+        destruction.addProp(place(Props.vase(0x9a2b2b), 3.15, shelf + 0.005, back - 0.2), { kind: 'vase', material: 'ceramic', mass: 0.8, hp: 0.25, brittle: 18, colors: [0xf4f1ea, 0x9a2b2b], proxy: lathe(0.4, 1) }),
+        destruction.addProp(place(Props.luckyCat(), 1.2, shelf + 0.005, back - 0.22, Math.PI), { kind: 'cat', material: 'ceramic', mass: 0.9, hp: 0.25, brittle: 18, colors: [0xf7f3ea, 0xf7f3ea, 0xc8282c, 0xe2b23c], shape: 'ball', proxy: (s) => new SphereGeometry(Math.min(s.x, s.y) * 0.5, 16, 12) }),
+        destruction.addProp(place(Props.bust(), -0.9, shelf + 0.005, back - 0.2, Math.PI), { kind: 'bust', material: 'plaster', mass: 6, hp: 0.8, brittle: 160, colors: [0xe8e2d4, 0xd5cebf], inside: 0xcfc8b8, proxy: (s) => new SphereGeometry(Math.min(s.x, s.y) * 0.5, 14, 10) }),
+        destruction.addProp(place(Props.volcano(), 0.4, shelf + 0.005, back - 0.22), { kind: 'volcano', material: 'plaster', mass: 2.5, hp: 0.6, brittle: 90, colors: [0x8a6b55, 0x8a6b55, 0xd9481c], inside: 0xff6a2a, proxy: (s) => new ConeGeometry(s.x * 0.5, s.y, 14, 2) }),
     ];
+    const hat = destruction.addProp(room.hat, { kind: 'hat', material: 'metal', mass: 0.4, shape: 'ball' });
+    const ext = destruction.addProp(room.ext, { kind: 'ext', material: 'metal', mass: 4, hp: 0.25 });
+    const books = room.books.map((b) => destruction.addProp(b, { kind: 'book', material: 'paper', mass: 0.4 }));
+    const plunger = destruction.addProp(room.plunger, { kind: 'plunger', material: 'metal', mass: 2.5 });
+    const cat = props.find((p) => p.kind === 'cat'), principal = props.find((p) => p.kind === 'bust'), pots = props.filter((p) => p.kind === 'pot');
 
-    // Targets. Breakables first; then things that only take a beating (walls, the board, the hat), checked last.
-    const targets = [], m = new Matrix4(), hidden = new Matrix4().makeScale(0, 0, 0);
-    for (const p of props) targets.push({ ...p, center: p.object.position.clone().setY(p.object.position.y + p.up), half: new Vector3(...p.half) });
-    targets.push({ kind: 'drywall', material: 'drywall', hp: 1.1, center: new Vector3(2.0, 2.0, back - 0.06), half: new Vector3(0.55, 0.36, 0.12), value: 1500, colors: [0xf2efe8, 0xd9d3c4, 0x1f3d7a] });
-    room.glass.forEach((pane) => targets.push({ kind: 'window', material: 'glass', hp: 0.2, pane, center: pane.position.clone().setX(pane.position.x + 0.1), half: new Vector3(0.25, 0.95, 0.85), value: 600, colors: [0xdff3ff] }));
-    room.seats.forEach((s, i) => targets.push({ kind: 'desk', material: 'wood', hp: 1.4, mesh: room.desks, index: i, center: new Vector3(s.x, 0.55, s.z), half: new Vector3(0.62, 0.25, 0.26), value: 400, colors: [0x9a6a3e, 0x80552f] }));
-    for (let i = 0; i < room.chairs.count; i++) {
-        room.chairs.getMatrixAt(i, m);
-        const p = new Vector3().setFromMatrixPosition(m);
-        targets.push({ kind: 'chair', material: 'wood', hp: 0.7, mesh: room.chairs, index: i, center: new Vector3(p.x, 0.45, p.z), half: new Vector3(0.22, 0.45, 0.22), value: 150, colors: [0x7f5632, 0x6b4527] });
+    // The tool and the free hand are kinematic bodies: they shove what they touch, slowly or not.
+    const kinematic = (radius) => { const b = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, -10, 0)); physicsWorld.createCollider(RAPIER.ColliderDesc.ball(radius).setDensity(800), b); return b; };
+    const toolBody = kinematic(0.055), handBody = kinematic(0.05);
+    // They only push when moving gently: a fast swing is a blow (an impulse from its momentum), not a bulldozer.
+    // Parking and unparking teleport (no inferred velocity), so nothing gets swept up on the way.
+    function steer(body, at, gentle) {
+        if (!at || !gentle) { if (!body.userData) { body.setTranslation({ x: 0, y: -10, z: 0 }, true); body.userData = 'parked'; } return; }
+        if (body.userData) { body.setTranslation({ x: at.x, y: at.y, z: at.z }, true); body.userData = null; }
+        else body.setNextKinematicTranslation({ x: at.x, y: at.y, z: at.z });
     }
-    targets.push({ kind: 'ext', material: 'metal', hp: 0.25, center: room.ext.position.clone(), half: new Vector3(0.11, 0.28, 0.11), value: 700, colors: [0xb3121a] });
-    targets.push({ kind: 'hat', material: 'metal', hp: Infinity, center: room.hat.position.clone().setY(room.hat.position.y + 0.06), half: new Vector3(0.17, 0.12, 0.17) });
-    targets.push({ kind: 'board', material: 'slate', hp: Infinity, center: new Vector3(0, 1.55, -4.74), half: new Vector3(2.05, 0.68, 0.12) });
-    for (const [x, z, hx, nz] of [[0, back, 4.5, -1], [-3.35, -back, 1.15, 1], [3.35, -back, 1.15, 1]]) targets.push({ kind: 'wall', material: 'plaster', hp: Infinity, center: new Vector3(x, 2.25, z), half: new Vector3(hx, 1.05, 0.14), normal: new Vector3(0, 0, nz) });
-    for (const t of targets) { t.max = t.hp; if (t.mesh) { t.mesh.getMatrixAt(t.index, m); t.matrix = m.clone(); } }
+    const handLast = new Vector3();
+    const ours = (c) => c.parent() !== toolBody && c.parent() !== handBody;
 
-    // The hole behind the poster, waiting, and the light that comes through it.
-    const holeView = place(Props.hole(), 2.0, 2.0, back - 0.008, Math.PI);
-    holeView.visible = false;
-    // No real light for it (a light added mid-game recompiles every material, and one more light costs every pixel on a Quest):
-    // a warm pool spilling across the floor in front of the hole does the job.
-    const daylight = new Mesh(new PlaneGeometry(2.6, 3.4), holeView.userData.halo.material.clone());
-    daylight.material.opacity = 0; daylight.material.color.set(0xffb070);
-    daylight.rotation.x = -Math.PI / 2; daylight.position.set(2.0, 0.008, back - 1.7);
-    scene.add(daylight);
-    const signHome = room.notAHole[2].position.clone(), signTurn = room.notAHole[2].rotation.clone();
-    const extHome = room.ext.rotation.clone(), hatHome = room.hat.position.clone();
-
-    // Debris: instanced pieces with gravity, spin, bounce and a floor. Each material breaks into its own shape.
-    const N = 600, white = (roughness, extra = {}) => new MeshStandardMaterial({ color: 0xffffff, roughness, ...extra });
+    // Chips: small cosmetic bits thrown off every blow (the real pieces are rigid bodies; these are the spray).
+    const N = 400, white = (roughness, extra = {}) => new MeshStandardMaterial({ color: 0xffffff, roughness, ...extra });
+    const hidden = new Matrix4().makeScale(0, 0, 0);
     const debris = {
-        wood: makePool(new BoxGeometry(1, 1, 1), white(0.65)),   // splinters and planks
-        glass: makePool(new BoxGeometry(1, 1, 1), white(0.04, { metalness: 0.9, transparent: true, opacity: 0.75 })),   // thin shards that catch the sun
-        shard: makePool(new BoxGeometry(1, 1, 1), white(0.3)),   // pottery and drywall: thin, curved-looking flakes
-        lump: makePool(new IcosahedronGeometry(0.5, 0), white(0.95, { flatShading: true })),   // plaster: crumbly chunks
+        wood: makePool(new BoxGeometry(1, 1, 1), white(0.65)),
+        glass: makePool(new BoxGeometry(1, 1, 1), white(0.04, { metalness: 0.9, transparent: true, opacity: 0.75 })),
+        shard: makePool(new BoxGeometry(1, 1, 1), white(0.3)),
+        lump: makePool(new IcosahedronGeometry(0.5, 0), white(0.95, { flatShading: true })),
     };
-    const POOL = { wood: 'wood', glass: 'glass', ceramic: 'shard', drywall: 'shard', plaster: 'lump', metal: 'shard' };
+    const POOL = { wood: 'wood', glass: 'glass', ceramic: 'shard', paper: 'shard', slate: 'lump', plaster: 'lump', metal: 'shard' };
+    const CHIPS = { wood: [0xa77548, 0xd8b088], glass: [0xdff3ff], ceramic: [0xf4f1ea, 0xd9a27a], plaster: [0xe8e2d4, 0xd5cebf], slate: [0x2a3530, 0x5a5e62], metal: [0xffd080], paper: [0xf4efe2] };
     function makePool(geometry, material) {
         const mesh = new InstancedMesh(geometry, material, N);
-        mesh.castShadow = true; mesh.frustumCulled = false;
+        mesh.castShadow = false; mesh.frustumCulled = false;
         for (let i = 0; i < N; i++) { mesh.setMatrixAt(i, hidden); mesh.setColorAt(i, new Color(0xffffff)); }
         scene.add(mesh);
         return { mesh, next: 0, parts: Array.from({ length: N }, () => ({ alive: false, p: new Vector3(), v: new Vector3(), q: new Quaternion(), w: new Vector3(), s: new Vector3() })) };
     }
     const spin = new Quaternion(), dummy = new Object3D(), tint = new Color(), rnd = () => Math.random() - 0.5;
-    function burst(material, at, dir, n, power, big, colors = [0xffffff], spread = big ? 0.4 : 0.06) {
-        const name = POOL[material], pool = debris[name];
+    function burst(material, at, dir, n, power, colors = CHIPS[material] ?? [0xffffff]) {
+        const name = POOL[material] ?? 'shard', pool = debris[name];
         for (let k = 0; k < n; k++) {
             const i = pool.next, d = pool.parts[i]; pool.next = (pool.next + 1) % N;
             d.alive = true; d.rest = 0; d.material = material;
-            d.p.copy(at).add(new Vector3(rnd(), rnd(), rnd()).multiplyScalar(spread));
+            d.p.copy(at).add(new Vector3(rnd(), rnd(), rnd()).multiplyScalar(0.05));
             d.v.copy(dir).multiplyScalar(power * (0.4 + Math.random())).add(new Vector3(rnd() * 2, Math.random() * 2, rnd() * 2).multiplyScalar(0.5 + power * 0.35));
-            d.w.set(rnd(), rnd(), rnd()).multiplyScalar(material === 'plaster' ? 10 : 22);
+            d.w.set(rnd(), rnd(), rnd()).multiplyScalar(22);
             d.q.random();
             const r = Math.random();
-            if (material === 'wood') d.s.set(0.015 + r * (big ? 0.45 : 0.025), 0.015 + Math.random() * 0.02, big ? 0.05 + Math.random() * 0.12 : 0.08 + Math.random() * 0.1);   // long, thin, along the grain
-            else if (material === 'glass') d.s.set(0.03 + r * 0.13, 0.003, 0.03 + Math.random() * 0.16);
-            else if (material === 'ceramic') d.s.set(0.015 + r * 0.05, 0.006, 0.015 + Math.random() * 0.05);   // small, and lots of them
-            else if (material === 'drywall') d.s.set(0.04 + r * (big ? 0.2 : 0.06), 0.013, 0.04 + Math.random() * (big ? 0.18 : 0.05));
-            else if (material === 'plaster') d.s.setScalar(0.015 + r * r * (big ? 0.11 : 0.04));
-            else d.s.set(0.01, 0.01, 0.01);
+            if (material === 'wood') d.s.set(0.006 + r * 0.012, 0.006, 0.04 + Math.random() * 0.06);   // splinters
+            else if (material === 'glass') d.s.set(0.01 + r * 0.03, 0.002, 0.01 + Math.random() * 0.03);
+            else if (material === 'plaster' || material === 'slate') d.s.setScalar(0.006 + r * r * 0.025);
+            else d.s.set(0.008 + r * 0.02, 0.004, 0.008 + Math.random() * 0.02);
             pool.mesh.setColorAt(i, tint.set(colors[k % colors.length]).offsetHSL(0, 0, rnd() * 0.08));
         }
         pool.mesh.instanceColor.needsUpdate = true;
@@ -242,11 +240,12 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     const craterMat = new MeshStandardMaterial({ map: Props.craterTexture(), transparent: true, roughness: 1, polygonOffset: true, polygonOffsetFactor: -3, depthWrite: false });
     const craters = Array.from({ length: 40 }, () => { const c = new Mesh(new PlaneGeometry(1, 1), craterMat); c.visible = false; c.receiveShadow = true; scene.add(c); return c; });
     let nextCrater = 0;
-    function crater(point, n, e) {
+    function crater(point, n, e, piece) {   // a dent where a blow didn't break through; it goes when the piece does
         const c = craters[nextCrater++ % craters.length];
-        c.visible = true; c.position.copy(point).setZ(n.z > 0 ? -back + 0.006 : back - 0.006);
-        c.rotation.set(0, n.z > 0 ? 0 : Math.PI, Math.random() * 6);
-        c.scale.setScalar(0.12 + e * 0.22);
+        c.visible = true; c.position.copy(point).addScaledVector(n, 0.004);
+        c.lookAt(point.clone().add(n)); c.rotateZ(Math.random() * 6);
+        c.scale.setScalar(0.08 + e * 0.18);
+        c.userData.piece = piece;
     }
 
     // Sound: synthesised per material, through a soft limiter so a combo of ten breaks doesn't clip.
@@ -354,105 +353,92 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     const anims = [];
     const animate = (dur, run, done) => anims.push({ t: 0, dur, run, done });
 
-    // How the blow lands, not just how fast. The axe wants its edge leading and the wood square-on;
-    // the flat of the blade is a slap. The hammer forgives the angle, but not a glancing blow.
-    const edge = new Vector3(), normal = new Vector3(), toolQ = new Quaternion();
-    function faceNormal(target, from) {   // the face of the box the head came in through
-        const d = from.clone().sub(target.center), h = target.half;
-        const ax = Math.abs(d.x) / h.x, ay = Math.abs(d.y) / h.y, az = Math.abs(d.z) / h.z;
-        return ax > ay && ax > az ? normal.set(Math.sign(d.x), 0, 0) : ay > az ? normal.set(0, Math.sign(d.y), 0) : normal.set(0, 0, Math.sign(d.z));
-    }
-    function hit(tool, i, t, target, point, speed, dir, now) {
-        if (now - (target.lastHit ?? -9) < 0.2) return false;
-        target.lastHit = now;
+    // How the blow lands, not just how fast. The axe wants its edge leading and the surface square-on; the flat of the
+    // blade is a slap. The hammer forgives the angle, but not a glancing blow. The surface and its normal are real:
+    // a ray along the path the head took this frame finds them.
+    const edge = new Vector3(), toolQ = new Quaternion();
+    let lastBlow = null;   // which blow a break that follows belongs to: tool, how well it was chosen, how hard
+    function hit(tool, i, piece, point, n, dir, speed, now) {
+        if (now - (piece.lastHit ?? -9) < 0.15) return false;
+        piece.lastHit = now;
         tool.mesh.getWorldQuaternion(toolQ);
         const align = edge.set(0, -1, 0).applyQuaternion(toolQ).dot(dir);   // 1: edge (or hammer face) leading the swing
-        const square = Math.max(0, -(target.normal ?? faceNormal(target, tool.entry ?? point)).dot(dir));   // 1: straight in; 0: skimming along the surface
+        const square = Math.max(0, -n.dot(dir));   // 1: straight in; 0: skimming along the surface
         const quality = tool.name === 'axe' ? 0.25 + 0.75 * Math.max(0, align) ** 1.5 : 0.6 + 0.4 * Math.abs(align);
         const e = Math.min(1.3, (speed - 0.8) / 5) * quality * (0.35 + 0.65 * square);   // 0: a tap; 1: a full committed swing, edge first, square on
-        const brittle = target.material === 'glass' || target.material === 'ceramic';
-        if (square < 0.3 && !brittle) { sound.glance(); haptic(i, 0.2, 25); state.score += 5; return true; }   // a glancing blow scrapes off
-        const affinity = AFFINITY[tool.name][target.material];
+        const material = piece.material, brittle = material === 'glass' || material === 'ceramic';
+        if (square < 0.25 && !brittle) { sound.glance(); haptic(i, 0.2, 25); state.score += 5; push(piece, point, dir, TOOL_MASS[tool.name] * speed * 0.15); return true; }   // a glancing blow scrapes off
+        const affinity = AFFINITY[tool.name][material] ?? 0.5;
         state.hits++;
         if (affinity === 1) state.right++;
-        else if (affinity < 0.9 && HINTS[target.material] && (state.wrong[target.material] = (state.wrong[target.material] ?? 0) + 1) >= 3 && !state.said.has(target.material)) { state.said.add(target.material); say(HINTS[target.material]); }
+        else if (affinity < 0.9 && HINTS[material] && (state.wrong[material] = (state.wrong[material] ?? 0) + 1) >= 3 && !state.said.has(material)) { state.said.add(material); say(HINTS[material]); }
         haptic(i, Math.min(1, 0.3 + e), 20 + e * 60);
-        if (target.hp === Infinity) return bump(tool, i, target, point, dir, e, now), true;
-        target.hp -= e * affinity;
-        // Follow-through: if the swing is still moving a tenth of a second later, the blow carried. Committed swings hit harder.
-        tool.follow = { target, at: now + 0.1, speed, e, affinity, dir: dir.clone(), point: point.clone() };
-        // A good axe blow into something fibrous that holds: the blade bites and stays.
-        if (tool.name === 'axe' && (target.kind === 'desk' || target.kind === 'drywall') && target.hp > 0 && align > 0.55 && square > 0.5 && e > 0.2) lodge(tool, i, target, point, dir, now);
-        const broke = target.hp <= 0;
-        sound[target.material](Math.max(0.3, e), broke);
-        burst(target.material, point, dir, Math.round(4 + e * 14), speed * 0.35, false, target.colors);
-        if (target.material === 'plaster' || target.material === 'drywall') puff(dust, point, 6 + e * 14, { color: 0xe4ded0, speed: 0.3 + e * 0.6, size: 0.12, dir });
-        if (target.material === 'metal') puff(sparks, point, 10 + e * 20, { color: 0xffb050, speed: 2 + e * 3, size: 0.012, life: 0.4, alpha: 1, grow: 0, drag: 0.5, dir });
-        if (target.mesh && !broke) target.shove = dir.clone().setY(0).multiplyScalar(0.04 * e);   // a jolt: the desk shoves along the hit, then settles
-        if (target.object && !broke) target.wobble = 1;
-        if (!broke) { state.score += Math.round(10 * e * (affinity === 1 ? 2 : 1)); return true; }
-        shatter(tool, target, point, dir, speed, e, affinity, now);
+        lastBlow = { tool: tool.name, affinity, e, at: now };
+        (sound[material] ?? sound.wood)(Math.max(0.3, e), false);
+        burst(material, point, n.clone().add(dir).normalize(), Math.round(3 + e * 10), 1 + speed * 0.3);
+        if (material === 'plaster' || material === 'slate') puff(dust, point, 6 + e * 18, { color: material === 'slate' ? 0xb8bcb4 : 0xe4ded0, speed: 0.3 + e * 0.6, size: 0.12, dir: n });
+        if (material === 'metal') puff(sparks, point, 10 + e * 20, { color: 0xffb050, speed: 2 + e * 3, size: 0.012, life: 0.4, alpha: 1, grow: 0, drag: 0.5, dir: n });
+        push(piece, point, dir, TOOL_MASS[tool.name] * speed * (0.3 + 0.5 * e));   // the blow's momentum: chairs topple, desks skid a little
+        if (piece.kind === 'hat') { sound.bonk(); state.materials.add('metal'); state.score += 50; if (!state.said.has('hat')) { state.said.add('hat'); say('IT IS A HELMET. THAT IS THE PROBLEM.'); } return true; }
+        if (piece.kind === 'ext' && !ext.spent && e > 0.15) { ext.spent = true; sound.powder(); state.powderUntil = now + 2.6; say('USE BEFORE. NOT AFTER.'); score(ext, 'ext', 'metal', e, 1); return true; }
+        if (piece.hp === Infinity) return true;
+        piece.hp -= e * affinity;
+        tool.follow = { piece, at: now + 0.1, speed, e, affinity, dir: dir.clone(), point: point.clone(), n: n.clone() };
+        // A good axe blow into wood that holds: the blade bites and stays.
+        if (tool.name === 'axe' && material === 'wood' && piece.hp > 0 && align > 0.55 && square > 0.5 && e > 0.2 && (piece.anchored || piece.parts)) return lodge(tool, i, piece, point, dir, now), true;
+        if (piece.hp > 0) {   // a blow that didn't break it: a dent, a crack, a wobble
+            if ((material === 'plaster' || material === 'slate' || material === 'glass') && e > 0.08) crater(point, n, e, piece);
+            if (piece.object) piece.wobble = 1;
+            state.score += Math.round(10 * e * (affinity === 1 ? 2 : 1));
+            return true;
+        }
+        breakPiece(piece, point, dir, e);
         return true;
     }
-
-    // Things that don't break, but react.
-    function bump(tool, i, target, point, dir, e, now) {
-        if (once[target.kind] && !state.said.has(target.kind) && e > 0.15) { state.said.add(target.kind); say(once[target.kind]); }
-        if (target.kind === 'wall') {
-            sound.plaster(Math.max(0.3, e), false);
-            if (e > 0.12) crater(point, target.normal, e);
-            burst('plaster', point, target.normal.clone().multiplyScalar(-1).add(dir).normalize(), Math.round(3 + e * 10), 1 + e * 2, false, [0xe8e2d4, 0xd5cebf]);
-            puff(dust, point, 8 + e * 16, { color: 0xe8e2d4, speed: 0.3 + e * 0.5, size: 0.14, dir: target.normal });
-            state.score += Math.round(15 * e); state.dust = Math.min(2.6, state.dust + 0.05 * e);
-            state.materials.add('plaster');
-        } else if (target.kind === 'board') {   // the one thing you cannot break, because it keeps the score
-            sound.slate(Math.max(0.3, e));
-            puff(dust, point, 14, { color: 0xf2f2ea, speed: 0.3, size: 0.08, dir: new Vector3(0, 0, 1) });
-            say(BOARD[Math.min(BOARD.length - 1, state.boardHits++)]);
-        } else if (target.kind === 'hat') {   // indestructible, and smug about it
-            sound.bonk(); sound.metal(0.4);
-            const hat = room.hat, y0 = hatHome.y;
-            animate(0.6, (f) => { hat.position.y = y0 + Math.sin(f * Math.PI) * 0.25; hat.rotation.y += 0.4; }, () => { hat.position.copy(hatHome); });
-            state.score += 50; state.materials.add('metal');
-        }
+    function push(piece, point, dir, impulse) {   // N·s, no more than would send it off at 3 m/s
+        const body = piece.body;
+        if (!body || !body.isDynamic?.()) return;
+        body.applyImpulseAtPoint(dir.clone().multiplyScalar(Math.min(impulse, body.mass() * 3)), point, true);
+    }
+    function breakPiece(piece, point, dir, e) {
+        for (const other of tools) if (other.lodged?.piece === piece) free(other, false);
+        for (const c of craters) if (c.userData.piece === piece) c.visible = false;
+        if (piece.parts) destruction.dismantle(piece, point, dir, e);   // desks and chairs come apart, then the board that took it splits
+        else if (piece.prop) destruction.breakProp(piece, point, dir, e);
+        else destruction.fracture(piece, point, dir, e);
+        if (piece.parts) onBreak(piece, { point, energy: e });
     }
 
-    function shatter(tool, target, point, dir, speed, e, affinity, now) {
-        if (target.mesh) { target.mesh.setMatrixAt(target.index, hidden); target.mesh.instanceMatrix.needsUpdate = true; }
-        if (target.pane) target.pane.visible = false;
-        if (target.object) target.object.visible = false;
+    // Every break, by tool or by gravity, lands here: sound, dust, the haze in the light, the score and the board's opinion.
+    function onBreak(piece, { point, energy = 0.5 }) {
+        const now = performance.now() / 1000, material = piece.material, kind = piece.kind;
+        const blow = lastBlow && now - lastBlow.at < 0.6 ? lastBlow : null;
+        (sound[material] ?? sound.wood)(Math.max(0.4, energy), true);
         renderer.shadowMap.needsUpdate = true;
-        for (const other of tools) if (other.lodged?.target === target) free(other, false);
-        const big = { wood: 14, glass: 40, ceramic: 45, plaster: 30, drywall: 26, metal: 0 }[target.material];
-        burst(target.material, target.center, dir, big, speed * 0.5, true, target.colors, target.kind === 'desk' || target.kind === 'window' ? 0.45 : 0.12);
-        if (target.kind === 'pot') burst('plaster', target.center, dir, 18, speed * 0.3, false, [0x3a2414, 0x4a301a, 0x3f7a33]);   // soil, and the plant
-        if (target.material === 'plaster' || target.material === 'drywall') { puff(dust, target.center, 70, { color: 0xe4ded0, spread: 0.3, speed: 0.6, size: 0.22, life: 4, dir }); state.dust += 0.4; }
-        if (target.kind === 'volcano') { sound.erupt(); for (let k = 0; k < 6; k++) setTimeout(() => puff(dust, target.center.clone().setY(target.center.y + 0.1), 12, { color: k % 2 ? 0xff6a2a : 0xffe6a0, speed: 1.6, up: 3, size: 0.1, life: 2, dir: new Vector3(0, 1, 0) }), k * 90); }
-        if (target.kind === 'drywall') reveal();
-        if (target.kind === 'ext') { sound.powder(); state.powderUntil = now + 2.6; const ext = room.ext; animate(0.5, (f) => { ext.rotation.z = extHome.z + f * 0.5; ext.rotation.x = extHome.x - f * 0.2; }); }
+        if (material === 'plaster' || material === 'slate') { puff(dust, point, 50, { color: material === 'slate' ? 0xb8bcb4 : 0xe4ded0, spread: 0.25, speed: 0.6, size: 0.22, life: 4 }); state.dust = Math.min(2.6, state.dust + 0.25); }
+        if (kind === 'volcano') { sound.erupt(); for (let k = 0; k < 6; k++) setTimeout(() => puff(dust, point.clone().setY(point.y + 0.1), 12, { color: k % 2 ? 0xff6a2a : 0xffe6a0, speed: 1.6, up: 3, size: 0.1, life: 2, dir: new Vector3(0, 1, 0) }), k * 90); }
+        if (kind === 'pot') burst('plaster', point, new Vector3(0, 1, 0), 18, 1.5, [0x3a2414, 0x4a301a, 0x3f7a33]);   // soil, and the plant
+        if (piece.generation > 0 && kind !== 'pane') return;   // breaking up rubble: the sound and the dust, not the score
+        score(piece, kind, material, blow?.e ?? energy, blow?.affinity ?? 1, !blow);
+        if (kind === 'wall' && Math.abs(point.x - 2.0) < 0.6 && Math.abs(point.y - 2.0) < 0.5 && point.z > 4) return say('OK. IT WAS A HOLE.');
+        const quips = QUIPS[kind];
+        if (quips && (Math.random() < 0.45 || !state.said.has(kind))) { state.said.add(kind); say(state.combo > 2 ? `COMBO x${state.combo}! ${quips[Math.floor(Math.random() * quips.length)]}` : quips[Math.floor(Math.random() * quips.length)]); }
+        else if (state.combo > 2) say(`COMBO x${state.combo}!`);
+    }
+    function score(piece, kind, material, e, affinity, chain = false) {
+        const now = performance.now() / 1000;
         state.combo = now - state.lastBreak < 2.5 ? state.combo + 1 : 1;
         state.bestCombo = Math.max(state.bestCombo, state.combo);
         state.lastBreak = now;
-        state.broken++; state.materials.add(target.material);
-        state.dust = Math.min(2.6, state.dust + (target.kind === 'chair' ? 0.12 : 0.3));   // what breaks hangs in the air, and in the light
-        const gained = Math.round(target.value * (affinity === 1 ? 1.5 : 1) * Math.min(8, state.combo) * (0.6 + e * 0.5));
+        state.broken++; state.materials.add(material);
+        state.dust = Math.min(2.6, state.dust + 0.12);   // what breaks hangs in the air, and in the light
+        const base = VALUE[kind] ?? 100, gained = Math.round(base * (affinity === 1 ? 1.5 : 1) * Math.min(8, state.combo) * (0.6 + Math.min(1.3, e) * 0.5) * (chain ? 1.5 : 1));   // knock-on breaks pay extra
         state.score += gained;
         flip();
-        const quips = QUIPS[target.kind] ?? [''];
-        const special = !['desk', 'chair', 'window'].includes(target.kind);
-        say(special ? quips[Math.floor(Math.random() * quips.length)] : state.combo > 2 ? `COMBO x${state.combo}! +${gained}` : Math.random() < 0.4 ? quips[Math.floor(Math.random() * quips.length)] : `+${gained}`);
     }
+    destruction.onBreak = onBreak;
 
-    // The poster comes down, the hole was a hole, and the summer comes in.
-    function reveal() {
-        const [cracks, glow, sign] = room.notAHole;
-        cracks.visible = glow.visible = false;
-        holeView.visible = true;
-        animate(1.1, (f) => { sign.position.set(signHome.x, signHome.y - (signHome.y - 0.05) * f * f, signHome.z - 0.25 * f); sign.rotation.set(-Math.PI / 2 * f * f, signTurn.y, signTurn.z + f * 0.6, 'YXZ'); });
-        animate(1.5, (f) => { daylight.material.opacity = 0.55 * f; holeView.userData.halo.material.opacity = 0.4 + 0.6 * f; });
-    }
-
-    function lodge(tool, i, target, point, dir, now) {
+    function lodge(tool, i, piece, point, dir, now) {
         const pivot = new Group();
         pivot.position.copy(point);   // pivot on the blade, so the handle quivers about it
         pivot.quaternion.copy(toolQ);
@@ -460,35 +446,43 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         pivot.updateMatrixWorld();
         pivot.attach(tool.mesh);
         pivot.position.addScaledVector(dir, 0.035);   // bitten in a few centimetres
-        tool.lodged = { target, pivot, at: now, hand: tool.grip.getWorldPosition(new Vector3()) };
+        pivot.userData.q = pivot.quaternion.clone();
+        tool.lodged = { piece, pivot, at: now, hand: tool.grip.getWorldPosition(new Vector3()) };
+        if (piece.parts) {   // stuck in a desk: the desk holds still, and the axe moves with it if it's shoved
+            const t = piece.body.translation(), r = piece.body.rotation();
+            tool.lodged.inBody = new Matrix4().compose(new Vector3(t.x, t.y, t.z), new Quaternion(r.x, r.y, r.z, r.w), new Vector3(1, 1, 1)).invert().multiply(pivot.matrix.clone());
+            piece.body.setLinvel({ x: 0, y: 0, z: 0 }, true); piece.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+        }
         tool.follow = null;
         sound.lodge();
         haptic(i, 1, 140);
         if (!state.lodges++) say('IT IS STUCK. PULL.');
     }
     function free(tool, yanked, i = 0, now = 0) {
-        const { pivot, target } = tool.lodged;
+        const { pivot, piece } = tool.lodged;
         tool.grip.attach(tool.mesh);
         tool.mesh.position.set(0, 0, 0); tool.mesh.quaternion.identity(); tool.mesh.rotation.set(TILT, 0, 0);
         scene.remove(pivot);
-        tool.lodged = null; tool.prev = null; tool.vel.set(0, 0, 0);
-        if (!yanked) return;
+        tool.lodged = null; tool.prev = null; tool.vel.set(0, 0, 0); tool.samples = null;
+        if (!yanked || piece.gone) return;
         sound.yank(); haptic(i, 0.8, 60);
-        burst(target.material, pivot.position, pivot.position.clone().sub(target.center).setY(0.5).normalize(), 12, 2.5, false, target.colors);
-        target.lastHit = -9;
-        target.hp -= 0.35;   // wrenching it out tears the material too
+        const out = tool.grip.getWorldPosition(new Vector3()).sub(pivot.position).normalize();
+        burst('wood', pivot.position, out, 12, 2.5);
+        push(piece, pivot.position, out, 6);   // wrenching it out drags the desk
+        piece.lastHit = -9;
+        piece.hp -= 0.35;   // and tears the wood
         state.score += 60;
-        if (target.hp <= 0) { target.hp = 0.001; hit(tool, i, now, target, pivot.position.clone(), 6, new Vector3(0, 1, 0), now + 1); }
+        if (piece.hp <= 0) breakPiece(piece, pivot.position.clone(), out, 0.6);
     }
     function resolveFollow(tool, i, now) {
         const f = tool.follow;
         if (!f || now < f.at) return;
         tool.follow = null;
-        if (f.target.hp <= 0 || tool.vel.length() < f.speed * 0.55) return;   // stopped dead: no follow-through
-        f.target.hp -= f.e * f.affinity * 0.4;
+        if (f.piece.gone || f.piece.hp <= 0 || tool.vel.length() < f.speed * 0.55) return;   // stopped dead: no follow-through
+        f.piece.hp -= f.e * f.affinity * 0.4;
         state.score += Math.round(25 * f.e);
         state.followThroughs++;
-        if (f.target.hp <= 0) { f.target.hp = 0.001; f.target.lastHit = -9; hit(tool, i, now, f.target, f.point, f.speed * 1.15, f.dir, now); }
+        if (f.piece.hp <= 0) breakPiece(f.piece, f.point, f.dir, f.e * 1.15);
     }
 
     function start(now) {
@@ -501,7 +495,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         state.phase = 'over';
         sound.bell([...WESTMINSTER].reverse());
         const kinds = MATERIALS.filter((k) => state.materials.has(k)).length, total = state.score + kinds * kinds * 400;
-        const grade = total > 30000 ? 'A+ (PLEASE LEAVE)' : total > 15000 ? 'B. SHOWS PROMISE. THE SCHOOL DOES NOT.' : total > 5000 ? 'C. NEEDS MORE DEMOLITION.' : 'F. GENTLE. SUSPICIOUSLY GENTLE.';
+        const grade = total > 40000 ? 'A+ (PLEASE LEAVE)' : total > 20000 ? 'B. SHOWS PROMISE. THE SCHOOL DOES NOT.' : total > 7000 ? 'C. NEEDS MORE DEMOLITION.' : 'F. GENTLE. SUSPICIOUSLY GENTLE.';
         say(`PENCILS DOWN. ${total} PTS, ${kinds}/6 MATERIALS. ${grade}`);
         state.total = total;
         state.finishedAt = performance.now() / 1000;
@@ -510,17 +504,13 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         setTimeout(() => state.phase === 'over' && showReport(total, kinds, grade), 2200);
     }
     function reset() {
-        for (const t of targets) { t.hp = t.max; if (t.mesh) t.mesh.setMatrixAt(t.index, t.matrix); if (t.pane) t.pane.visible = true; if (t.object) t.object.visible = true; }
-        room.desks.instanceMatrix.needsUpdate = room.chairs.instanceMatrix.needsUpdate = true;
-        renderer.shadowMap.needsUpdate = true;
+        for (const tool of tools) if (tool.lodged) free(tool, false);
+        destruction.reset();   // the whole room, put back: walls, glass, furniture, everything on the shelves
         for (const pool of Object.values(debris)) { pool.parts.forEach((d, i) => { d.alive = false; pool.mesh.setMatrixAt(i, hidden); }); pool.mesh.instanceMatrix.needsUpdate = true; }
         for (const cloud of [dust, sparks]) cloud.life.fill(0);
         for (const c of craters) c.visible = false;
-        for (const tool of tools) if (tool.lodged) free(tool, false);
-        const [cracks, glow, sign] = room.notAHole;
-        cracks.visible = glow.visible = true; sign.position.copy(signHome); sign.rotation.copy(signTurn);
-        holeView.visible = false; daylight.material.opacity = 0; report.visible = false;
-        room.ext.rotation.copy(extHome); room.hat.position.copy(hatHome);
+        renderer.shadowMap.needsUpdate = true;
+        report.visible = false; ext.spent = false;
         anims.length = 0;
         Object.assign(state, { phase: 'ready', ...fresh() });
         writeTag('1:30');
@@ -528,30 +518,68 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     }
 
     // Personality: the cat waves, and flinches when a tool comes at it; the Principal leans away; the plants shiver.
-    const cat = props.find((p) => p.kind === 'cat'), principal = props.find((p) => p.kind === 'bust'), pots = props.filter((p) => p.kind === 'pot');
     const fear = { cat: 0, bust: 0, squeakAt: -9 };
     function personality(t, dt, heads) {
         const near = (object, r) => heads.some(({ p, speed }) => speed > 1 && p.distanceTo(object.position) < r);
         const k = 1 - Math.exp(-dt * 14);
-        const catScared = cat.object.visible && near(cat.object, 0.7);
-        if (catScared && fear.cat < 0.3 && t - fear.squeakAt > 1.2) { fear.squeakAt = t; sound.squeak(); }
-        fear.cat += ((catScared ? 1 : 0) - fear.cat) * k;
-        const { head, paw } = cat.object.userData;
-        head.rotation.set(-0.3 * fear.cat, 1.1 * fear.cat, 0);                   // looks away
-        paw.rotation.z = fear.cat > 0.5 ? 1.2 : Math.sin(t * 4) * 0.35;           // stops waving, covers up
-        cat.object.scale.set(1 + 0.08 * fear.cat, 1 - 0.14 * fear.cat, 1);       // ducks
-        fear.bust += ((principal.object.visible && near(principal.object, 0.8) ? 1 : 0) - fear.bust) * k;
-        principal.object.userData.head.rotation.set(-0.35 * fear.bust, 0, 0.12 * fear.bust);
-        principal.object.rotation.x = -0.1 * fear.bust;
-        for (const p of pots) if (p.object.visible) {
+        if (!cat.gone) {
+            const catScared = near(cat.object, 0.7);
+            if (catScared && fear.cat < 0.3 && t - fear.squeakAt > 1.2) { fear.squeakAt = t; sound.squeak(); }
+            fear.cat += ((catScared ? 1 : 0) - fear.cat) * k;
+            const { head, paw } = cat.object.userData;
+            head.rotation.set(-0.3 * fear.cat, 1.1 * fear.cat, 0);                   // looks away
+            paw.rotation.z = fear.cat > 0.5 ? 1.2 : Math.sin(t * 4) * 0.35;           // stops waving, covers up
+        }
+        if (!principal.gone) {
+            fear.bust += ((near(principal.object, 0.8) ? 1 : 0) - fear.bust) * k;
+            principal.object.userData.head.rotation.set(-0.35 * fear.bust, 0, 0.12 * fear.bust);
+        }
+        for (const p of pots) if (!p.gone) {
             const shiver = near(p.object, 0.6) ? 1 : 0;
             p.object.userData.leaves.forEach((leaf, j) => { leaf.rotation.y = shiver * Math.sin(t * 40 + j) * 0.25; });
         }
-        for (const p of props) if (p.wobble) {   // a hit that didn't break it: it rocks on its base
-            p.wobble *= Math.exp(-dt * 5);
-            p.object.rotation.z = Math.sin(t * 30) * 0.12 * p.wobble;
-            if (p.wobble < 0.01) { p.wobble = 0; p.object.rotation.z = 0; }
+    }
+
+    // Brittle things that land hard break; heavy things that land hard thud; glass tinkles.
+    let lastTink = 0;
+    const born = performance.now() / 1000;
+    function onForce(event) {
+        const now = performance.now() / 1000, force = event.totalForceMagnitude();
+        if (now - born < 2) return;   // the first moments: everything settling onto its shelf is not a fall
+        for (const handle of [event.collider1(), event.collider2()]) {
+            const p = destruction.pieces.get(handle);
+            if (!p || p.gone) continue;
+            if (p.prop && p.brittle && force > p.brittle * 4 && p.hp !== Infinity) {
+                const t = p.body.translation(), v = p.body.linvel();
+                destruction.breakProp(p, new Vector3(t.x, t.y - p.size.y * 0.3, t.z), new Vector3(v.x, v.y, v.z).normalize(), Math.min(1, force / (p.brittle * 20)));
+            } else if (now - lastTink > 0.04 && (p.material === 'glass' || p.material === 'ceramic')) { lastTink = now; sound.tink(p.material); }
+            else if (now - lastTink > 0.08 && force > 300) { lastTink = now; (sound[p.material] ?? sound.wood)(Math.min(0.6, force / 3000), false); }
         }
+    }
+
+    // The tool's path this frame, sampled along the striking edge: rays from where each point was to where it is.
+    // The axe strikes with its edge, and with its pick on the back-swing; the sledge with either face.
+    const SAMPLES = { axe: [new Vector3(0, -0.145, -0.5), new Vector3(0, -0.14, -0.43), new Vector3(0, -0.125, -0.57), new Vector3(0, -0.06, -0.5), new Vector3(0, 0.16, -0.53)], hammer: [new Vector3(0, -0.11, -0.64), new Vector3(0, 0.11, -0.64), new Vector3(0, 0, -0.64)] };
+    const ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }), a = new Vector3(), b = new Vector3();
+    function sweep(tool, i, speed, now) {
+        const pts = SAMPLES[tool.name].map((s) => tool.mesh.localToWorld(s.clone()));
+        const prev = tool.samples;
+        tool.samples = pts;
+        if (!prev || speed < 1.2) return;
+        let best = null;
+        for (let k = 0; k < pts.length; k++) {
+            a.copy(prev[k]); b.copy(pts[k]).sub(a);
+            const len = b.length() + 0.02;
+            if (len < 0.025) continue;
+            b.normalize();
+            ray.origin = { x: a.x, y: a.y, z: a.z }; ray.dir = { x: b.x, y: b.y, z: b.z };
+            const found = physicsWorld.castRayAndGetNormal(ray, len, true, undefined, undefined, undefined, undefined, ours);
+            if (found && (!best || found.timeOfImpact < best.toi)) best = { toi: found.timeOfImpact, collider: found.collider, n: new Vector3(found.normal.x, found.normal.y, found.normal.z), point: a.clone().addScaledVector(b, found.timeOfImpact), dir: b.clone() };
+        }
+        if (!best) return;
+        const piece = destruction.pieceOf(best.collider);
+        if (!piece || piece.gone) return;
+        hit(tool, i, piece, best.point, best.n.lengthSq() > 0.5 ? best.n : best.dir.clone().negate(), tool.vel.clone().normalize(), speed, now);
     }
 
     const world = new Vector3(), dir = new Vector3(), heads = tools.map(() => ({ p: new Vector3(), speed: 0 }));
@@ -561,9 +589,17 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         for (let i = anims.length - 1; i >= 0; i--) { const a = anims[i]; a.t += dt; const f = Math.min(1, a.t / a.dur); a.run(f); if (f === 1) { anims.splice(i, 1); a.done?.(); } }
         const slow = t < state.slowUntil ? 0.15 + 0.85 * ((1.8 - (state.slowUntil - t)) / 1.8) ** 3 : 1;   // the final bell eases time back in
         stepCloud(dust, dt * slow, 0.02); stepCloud(sparks, dt * slow, 6);
-        if (t < state.powderUntil) puff(dust, room.ext.position.clone().setY(1.55), 6, { color: 0xffffff, speed: 2.2, size: 0.09, life: 3, grow: 1.4, alpha: 0.35, dir: new Vector3(Math.sin(t * 7) - 0.8, 0.2, Math.cos(t * 5) * 0.8).normalize(), drag: 1.2 });   // the extinguisher, finally used
+        if (t < state.powderUntil && !ext.gone) {   // the extinguisher, finally used: it sprays, and the spray shoves it round the floor
+            const tt = ext.body.translation(), r = ext.body.rotation(), nozzle = new Vector3(0, 0.3, 0).applyQuaternion(new Quaternion(r.x, r.y, r.z, r.w));
+            const jet = new Vector3(Math.sin(t * 7), 0.2, Math.cos(t * 5)).normalize();
+            puff(dust, new Vector3(tt.x, tt.y, tt.z).add(nozzle), 6, { color: 0xffffff, speed: 2.2, size: 0.09, life: 3, grow: 1.4, alpha: 0.35, dir: jet, drag: 1.2 });
+            ext.body.applyImpulse(jet.multiplyScalar(-0.35), true);
+        }
+        const moving = physics.step(dt * slow, onForce);
+        destruction.update(dt);
+        if (moving && (state.frame = (state.frame ?? 0) + 1) % 2 === 0) renderer.shadowMap.needsUpdate = true;   // moving things move their shadows
         if (renderer.xr.isPresenting) syncAnchors();
-        if (!renderer.xr.isPresenting || state.phase === 'intro') return;
+        if (!renderer.xr.isPresenting || state.phase === 'intro') { stepDebris(dt * slow); return; }
         locomote(dt);
         if (state.phase === 'play' && t > state.endsAt) finish();
         if (state.phase === 'play' && Math.ceil(state.endsAt - t) !== state.shown) {
@@ -574,15 +610,27 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         }
         for (const h of heads) h.speed = 0;
         if (holder.hand === null) equip(0);
+        // The free hand is a body too: you can shove a chair over with it.
+        const freeAnchor = holder.hand === null ? null : anchors[1 - holder.hand];
+        if (freeAnchor?.visible) {
+            freeAnchor.updateMatrixWorld(true);
+            const h = new Vector3().setFromMatrixPosition(freeAnchor.matrixWorld), v = dt > 0 ? h.distanceTo(handLast) / dt : 0;
+            steer(handBody, h, v < 1.5); handLast.copy(h);
+        } else steer(handBody, null);
         tools.forEach((tool) => {
             const i = tool.hand ?? 0;
             if (tool !== active() && !tool.lodged) return;
-            if (!tool.grip.visible) { tool.prev = null; return; }
+            if (!tool.grip.visible) { tool.prev = null; tool.samples = null; steer(toolBody, null); return; }
             if (tool.lodged) {   // the handle quivers, and the hand has to pull it free
                 const l = tool.lodged, age = t - l.at;
-                l.pivot.quaternion.copy(l.pivot.userData.q ??= l.pivot.quaternion.clone());
+                if (l.inBody && !l.piece.gone) {
+                    const tr = l.piece.body.translation(), r = l.piece.body.rotation();
+                    new Matrix4().compose(new Vector3(tr.x, tr.y, tr.z), new Quaternion(r.x, r.y, r.z, r.w), new Vector3(1, 1, 1)).multiply(l.inBody).decompose(l.pivot.position, l.pivot.userData.q, new Vector3());
+                }
+                l.pivot.quaternion.copy(l.pivot.userData.q);
                 l.pivot.rotateX(Math.sin(age * 57) * 0.22 * Math.exp(-age * 5));
-                if (tool.grip.getWorldPosition(dir).distanceTo(l.hand) > 0.3 || age > 6) free(tool, age <= 6, i, t);
+                steer(toolBody, null);
+                if (l.piece.gone || tool.grip.getWorldPosition(dir).distanceTo(l.hand) > 0.3 || age > 6) free(tool, !l.piece.gone && age <= 6, i, t);
                 return;
             }
             resolveFollow(tool, i, t);
@@ -590,65 +638,35 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
             if (tool.prev && dt > 0) tool.vel.lerp(dir.subVectors(world, tool.prev).divideScalar(dt), 0.6);
             tool.prev = (tool.prev ?? new Vector3()).copy(world);
             const speed = tool.vel.length();
-            if (t < (tool.settle ?? 0)) { tool.vel.set(0, 0, 0); return; }
+            steer(toolBody, world, speed < 1.2);
+            if (t < (tool.settle ?? 0)) { tool.vel.set(0, 0, 0); tool.samples = null; return; }
             heads[0].p.copy(world); heads[0].speed = speed;
-            if (speed < 1.2) return;   // resting, or a gentle touch
-            kick(world, tool.vel);
-            if (state.phase === 'ready') start(t);
-            if (state.phase === 'over') { if (t - state.finishedAt > 4 && speed > 3) reset(); return; }
-            dir.copy(tool.vel).normalize();
-            const entry = world.clone().addScaledVector(tool.vel, -dt * 1.5);   // where the head was just before: tells which face it came through
-            for (const target of targets) {
-                if (target.hp <= 0 || tool.lodged) continue;
-                if (Math.abs(world.x - target.center.x) < target.half.x && Math.abs(world.y - target.center.y) < target.half.y && Math.abs(world.z - target.center.z) < target.half.z) {
-                    tool.entry = entry;
-                    if (hit(tool, i, t, target, world.clone(), speed, dir.clone(), t)) break;   // one thing per swing per frame: the nearest layer takes it
-                }
-            }
+            if (speed > 1.2 && state.phase === 'ready') start(t);
+            if (state.phase === 'over') { if (speed > 3 && t - state.finishedAt > 4) reset(); tool.samples = null; return; }
+            sweep(tool, i, speed, t);
         });
         personality(t, dt, heads);
-        // Jolted furniture springs back.
-        for (const target of targets) if (target.shove) {
-            m.copy(target.matrix); m.elements[12] += target.shove.x; m.elements[14] += target.shove.z;
-            target.mesh.setMatrixAt(target.index, m); target.mesh.instanceMatrix.needsUpdate = true;
-            target.shove.multiplyScalar(0.8); if (target.shove.lengthSq() < 1e-7) target.shove = null;
-        }
         stepDebris(dt * slow);
     }
 
-    // A swinging tool bats loose debris out of the way.
-    function kick(at, vel) {
-        for (const pool of Object.values(debris)) for (const d of pool.parts) {
-            if (!d.alive || Math.abs(d.p.x - at.x) > 0.15 || Math.abs(d.p.z - at.z) > 0.15 || Math.abs(d.p.y - at.y) > 0.15) continue;
-            d.v.copy(vel).multiplyScalar(0.5 + Math.random() * 0.3).add(new Vector3(0, 1 + Math.random(), 0));
-            d.w.set(rnd(), rnd(), rnd()).multiplyScalar(18); d.rest = 0;
-        }
-    }
     function stepDebris(dt) {
         for (const pool of Object.values(debris)) {
             let moved = false;
             pool.parts.forEach((d, i) => {
                 if (!d.alive || d.rest > 1) return;
                 moved = true;
-                const flutter = d.material === 'drywall' || d.material === 'glass' ? 0.97 : 0.995;   // flat things sail a little
-                d.v.y -= 9.8 * dt; d.v.x *= flutter; d.v.z *= flutter; d.p.addScaledVector(d.v, dt);
+                d.v.y -= 9.8 * dt; d.v.x *= 0.99; d.v.z *= 0.99; d.p.addScaledVector(d.v, dt);
                 spin.setFromAxisAngle(dir.copy(d.w).normalize(), d.w.length() * dt); d.q.premultiply(spin);
                 const floor = Math.min(d.s.x, d.s.y, d.s.z) / 2;
-                if (d.p.y < floor) {   // the floor: bounce, scrape, settle flat
-                    const impact = -d.v.y;
-                    d.p.y = floor; d.v.y *= d.material === 'plaster' ? -0.15 : -0.3; d.v.x *= 0.6; d.v.z *= 0.6; d.w.multiplyScalar(0.5);
-                    if ((d.material === 'glass' || d.material === 'ceramic') && impact > 1 && Math.random() < 0.12) sound.tink(d.material);
-                    if (d.v.lengthSq() < 0.02) {
-                        d.rest += dt * 10; d.w.set(0, 0, 0);
-                        if (d.material !== 'plaster') { const thin = d.s.y < d.s.x ? 'y' : 'x'; d.q.setFromAxisAngle(new Vector3(0, 1, 0), Math.random() * 6); if (thin === 'x') d.q.multiply(new Quaternion().setFromAxisAngle(new Vector3(0, 0, 1), Math.PI / 2)); }
-                    }
+                if (d.p.y < floor) {   // the floor: bounce, scrape, settle flat, and fade after a while
+                    d.p.y = floor; d.v.y *= -0.25; d.v.x *= 0.5; d.v.z *= 0.5; d.w.multiplyScalar(0.5);
+                    if (d.v.lengthSq() < 0.02) { d.rest += dt * 10; d.w.set(0, 0, 0); }
                 }
-                d.p.x = Math.max(-4.4, Math.min(4.4, d.p.x)); d.p.z = Math.max(-4.7, Math.min(4.7, d.p.z));
                 dummy.position.copy(d.p); dummy.quaternion.copy(d.q); dummy.scale.copy(d.s); dummy.updateMatrix();
                 pool.mesh.setMatrixAt(i, dummy.matrix);
             });
             if (moved) pool.mesh.instanceMatrix.needsUpdate = true;
         }
     }
-    return { update, state, tools, targets, props, reset, start, finish, equip, holder, hole: holeView, report };
+    return { update, state, tools, props, hat, ext, books, plunger, reset, start, finish, equip, holder, report, destruction };
 }

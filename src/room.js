@@ -52,6 +52,19 @@ export function buildRoom(scene, { cjk }) {
         parent.add(mesh);
         return mesh;
     };
+    // Everything that can be broken is handed over as a piece, not built: a box with its material, world-scaled UVs and a kind.
+    // The destruction system batches the intact ones and gives each a collider. `mount` records what hangs on them.
+    const pieces = [], mounts = [];
+    const piece = (mat, w, h, d, x, y, z, { tile = 1, kind = 'wall', cast = true, uv } = {}) => pieces.push({ mat, size: [w, h, d], pos: [x, y, z], tile, kind, cast, uv });
+    const wall = (mat, axis, from, to, rows, depth, at, { tile = 1, kind = 'wall', size = 0.95 } = {}) => {   // a wall cut into tiles about `size` wide
+        const n = Math.max(1, Math.round((to - from) / size)), step = (to - from) / n;
+        for (let i = 0; i < n; i++) for (const [y0, y1] of rows) {
+            const c = from + step * (i + 0.5);
+            if (axis === 'x') piece(mat, step, y1 - y0, depth, c, (y0 + y1) / 2, at, { tile, kind });
+            else piece(mat, depth, y1 - y0, step, at, (y0 + y1) / 2, c, { tile, kind });
+        }
+    };
+    const mount = (object) => { mounts.push(object); return object; };
     const note = (text, color, x, y, z, ry = 0, rz = (Math.random() - 0.5) * 0.2, size) => decal(P.sticky(text, color, size), 0.13, 0.13, x, y, z, { ry, rz });
     const flatNote = (text, color, x, y, z, rz) => decal(P.sticky(text, color), 0.12, 0.12, x, y, z, { rx: -Math.PI / 2, rz });
 
@@ -65,52 +78,49 @@ export function buildRoom(scene, { cjk }) {
     // Front and back walls: plaster over dark wainscot, with rails.
     for (const side of [-1, 1]) {
         const z = side * D / 2;
-        box(M.plaster, W, H, 0.2, 0, H / 2, z + side * 0.1, { tile: 2 });
-        box(M.wains, W, 0.95, 0.03, 0, 0.475, z - side * 0.015, { tile: 1.2 });
-        box(M.trim, W, 0.06, 0.06, 0, 0.98, z - side * 0.03);
-        box(M.trim, W, 0.05, 0.04, 0, 2.38, z - side * 0.02);
-        box(M.trim, W, 0.1, 0.06, 0, H - 0.05, z - side * 0.03);
+        wall('wains', 'x', -W / 2, W / 2, [[0, 0.98]], 0.23, z + side * 0.085, { tile: 1.2 });   // the lower wall, faced in dark wood
+        wall('plaster', 'x', -W / 2, W / 2, [[0.98, 2.14], [2.14, H]], 0.2, z + side * 0.1, { tile: 2 });
+        wall('trim', 'x', -W / 2, W / 2, [[0.95, 1.01]], 0.06, z - side * 0.03, { kind: 'trim' });
+        wall('trim', 'x', -W / 2, W / 2, [[2.355, 2.405]], 0.04, z - side * 0.02, { kind: 'trim' });
+        wall('trim', 'x', -W / 2, W / 2, [[H - 0.1, H]], 0.06, z - side * 0.03, { kind: 'trim' });
     }
 
     // Right wall: the corridor, frosted panes and two sliding doors.
-    box(M.plaster, 0.2, H, D, W / 2 + 0.1, H / 2, 0, { tile: 2 });
-    box(M.wains, 0.03, 1.0, D, W / 2 - 0.015, 0.5, 0, { tile: 1.2 });
-    box(M.trim, 0.06, 0.06, D, W / 2 - 0.03, 1.02, 0);
-    for (const z of [-2.4, -0.8, 0.8, 2.4]) {
-        const pane = new Mesh(new PlaneGeometry(1.45, 1.35), M.frosted);
-        pane.position.set(W / 2 - 0.012, 1.75, z); pane.rotation.y = -Math.PI / 2;
-        scene.add(pane);
-        for (const dz of [-0.725, 0, 0.725]) box(M.trim, 0.05, 1.4, 0.05, W / 2 - 0.03, 1.75, z + dz, { cast: false });
-        for (const y of [1.08, 1.75, 2.42]) box(M.trim, 0.05, 0.05, 1.45, W / 2 - 0.03, y, z, { cast: false });
+    wall('wains', 'z', -D / 2, D / 2, [[0, 1.0]], 0.23, W / 2 + 0.085, { tile: 1.2 });
+    wall('plaster', 'z', -D / 2, D / 2, [[1.0, 2.15], [2.15, H]], 0.2, W / 2 + 0.1, { tile: 2 });
+    wall('trim', 'z', -D / 2, D / 2, [[0.99, 1.05]], 0.06, W / 2 - 0.03, { kind: 'trim' });
+    for (const z of [-2.4, -0.8, 0.8, 2.4]) {   // frosted panes in a 2 x 2 grid of bars
+        for (const dz of [-0.3625, 0.3625]) for (const y of [1.4125, 2.0875]) piece('frosted', 0.008, 0.675, 0.725, W / 2 - 0.012, y, z + dz, { kind: 'pane', cast: false });
+        for (const dz of [-0.725, 0, 0.725]) for (const y of [1.4125, 2.0875]) piece('trim', 0.05, 0.7, 0.05, W / 2 - 0.03, y, z + dz, { kind: 'trim', cast: false });
+        for (const y of [1.08, 1.75, 2.42]) for (const dz of [-0.3625, 0.3625]) piece('trim', 0.05, 0.05, 0.725, W / 2 - 0.03, y, z + dz, { kind: 'trim', cast: false });
     }
     for (const z of [-3.95, 3.95]) {
-        box(M.chair, 0.05, 2.0, 0.92, W / 2 - 0.04, 1.0, z, { tile: 0.9 });
-        const pane = new Mesh(new PlaneGeometry(0.5, 0.6), M.frosted);
-        pane.position.set(W / 2 - 0.068, 1.45, z); pane.rotation.y = -Math.PI / 2;
-        scene.add(pane);
-        box(M.trim, 0.07, 0.08, 1.0, W / 2 - 0.04, 2.04, z);
+        for (const y of [0.5, 1.5]) piece('chair', 0.05, 1.0, 0.92, W / 2 - 0.04, y, z, { tile: 0.9, kind: 'door' });
+        piece('frosted', 0.008, 0.6, 0.5, W / 2 - 0.068, 1.45, z, { kind: 'pane', cast: false });
+        piece('trim', 0.07, 0.08, 1.0, W / 2 - 0.04, 2.04, z, { kind: 'trim' });
     }
-    note('Bomb squad: knock twice. Everyone else: run.', 'orange', W / 2 - 0.07, 1.2, 3.75, -Math.PI / 2);
+    mount(note('Bomb squad: knock twice. Everyone else: run.', 'orange', W / 2 - 0.07, 1.2, 3.75, -Math.PI / 2));
 
     // Left wall: four tall window bays, wooden posts, the summer outside.
     const solids = [[-D / 2, WINDOWS[0][0]], ...WINDOWS.slice(1).map(([a], i) => [WINDOWS[i][1], a]), [WINDOWS[3][1], D / 2]];
-    box(M.plaster, 0.25, SILL, D, -W / 2 - 0.125, SILL / 2, 0, { tile: 2 });
-    box(M.wains, 0.03, SILL, D, -W / 2 + 0.015, SILL / 2, 0, { tile: 1.2 });
-    box(M.plaster, 0.25, H - HEAD, D, -W / 2 - 0.125, (H + HEAD) / 2, 0, { tile: 2 });
-    for (const [a, b] of solids) box(M.trim, 0.3, HEAD - SILL, b - a, -W / 2 - 0.12, (SILL + HEAD) / 2, (a + b) / 2);
-    box(M.trim, 0.34, 0.05, D, -W / 2 - 0.05, SILL + 0.02, 0);
-    box(M.trim, 0.3, 0.08, D, -W / 2 - 0.1, HEAD + 0.04, 0);
-    const panes = [];
-    for (const [a, b] of WINDOWS) {
-        const c = (a + b) / 2, glass = new Mesh(new PlaneGeometry(b - a, HEAD - SILL), M.glass.clone());
-        glass.material.opacity = 0.16; panes.push(glass);
-        glass.position.set(-W / 2 - 0.08, (SILL + HEAD) / 2, c); glass.rotation.y = Math.PI / 2;
-        scene.add(glass);
-        for (const dz of [-0.425, 0, 0.425]) box(M.trim, 0.06, HEAD - SILL, dz ? 0.03 : 0.06, -W / 2 - 0.08, (SILL + HEAD) / 2, c + dz);
-        for (let k = 1; k < 4; k++) box(M.trim, 0.06, 0.03, b - a, -W / 2 - 0.08, SILL + (HEAD - SILL) * k / 4, c);
+    wall('wains', 'z', -D / 2, D / 2, [[0, SILL]], 0.28, -W / 2 - 0.11, { tile: 1.2 });
+    wall('plaster', 'z', -D / 2, D / 2, [[HEAD, H]], 0.25, -W / 2 - 0.125, { tile: 2 });
+    const mid = (SILL + HEAD) / 2;
+    for (const [a, b] of solids) for (const [y0, y1] of [[SILL, mid], [mid, HEAD]]) piece('trim', 0.3, y1 - y0, b - a, -W / 2 - 0.12, (y0 + y1) / 2, (a + b) / 2, { kind: 'post' });
+    wall('trim', 'z', -D / 2, D / 2, [[SILL - 0.005, SILL + 0.045]], 0.34, -W / 2 - 0.05, { kind: 'trim' });
+    wall('trim', 'z', -D / 2, D / 2, [[HEAD, HEAD + 0.08]], 0.3, -W / 2 - 0.1, { kind: 'trim' });
+    for (const [a, b] of WINDOWS) {   // each bay: sixteen panes in a grid of bars
+        const c = (a + b) / 2, cw = (b - a) / 4, ch = (HEAD - SILL) / 4;
+        for (let i = 0; i < 4; i++) for (let k = 0; k < 4; k++) piece('glass', 0.006, ch, cw, -W / 2 - 0.08, SILL + ch * (k + 0.5), a + cw * (i + 0.5), { kind: 'pane', cast: false });
+        for (const dz of [-0.425, 0, 0.425]) for (const [y0, y1] of [[SILL, mid], [mid, HEAD]]) piece('trim', 0.06, y1 - y0, dz ? 0.03 : 0.06, -W / 2 - 0.08, (y0 + y1) / 2, c + dz, { kind: 'trim' });
+        for (let k = 1; k < 4; k++) for (const dz of [-cw, cw]) piece('trim', 0.06, 0.03, cw * 2, -W / 2 - 0.08, SILL + ch * k, c + dz, { kind: 'trim' });
     }
-    note('This window has been tested. From both sides.', 'blue', -W / 2 - 0.05, 1.55, 1.4, Math.PI / 2);
+    mount(note('This window has been tested. From both sides.', 'blue', -W / 2 - 0.05, 1.55, 1.4, Math.PI / 2));
     decal(P.outside(), 46, 18, -16, 5, 0, { ry: Math.PI / 2, lit: false });
+    // What is outside the other walls, for when they are not there any more: the same overexposed summer.
+    decal(P.outside(), 46, 18, 0, 5, -16, { lit: false });
+    decal(P.outside(), 46, 18, 0, 5, 16, { ry: Math.PI, lit: false });
+    decal(P.outside(), 46, 18, 16, 5, 0, { ry: -Math.PI / 2, lit: false });
 
     // AO by hand: soft dark strips where walls meet floor and ceiling.
     const strip = P.gradientStrip(), shade = (w, h, x, y, z, rx, ry) => decal(strip, w, h, x, y, z, { rx, ry, lit: false });
@@ -122,18 +132,20 @@ export function buildRoom(scene, { cjk }) {
 
     // The front: blackboard, scrolls, the safety sign, a clock that knows the truth, the speaker.
     const front = -D / 2;
-    box(M.trim, 4.24, 1.48, 0.06, 0, 1.55, front + 0.03);
-    const board = new Mesh(new PlaneGeometry(4.0, 1.29), new MeshStandardMaterial({ map: P.blackboard(), roughness: 0.82, envMapIntensity: 0.4 }));
-    board.position.set(0, 1.55, front + 0.062); board.receiveShadow = true;
-    scene.add(board);
-    box(M.trim, 4.1, 0.035, 0.11, 0, 0.84, front + 0.1);
+    M.slate = new MeshStandardMaterial({ map: P.blackboard(), roughness: 0.82, envMapIntensity: 0.4 });
+    for (let i = 0; i < 4; i++) {   // the frame and the slate, in four panels; the chalk stays on the pieces
+        piece('trim', 1.06, 1.48, 0.06, -1.59 + i * 1.06, 1.55, front + 0.03, { kind: 'frame' });
+        piece('slate', 1.0, 1.29, 0.02, -1.5 + i * 1.0, 1.55, front + 0.0525, { kind: 'board', uv: { x0: -2.0, y0: 1.55 - 0.645, w: 4.0, h: 1.29 } });
+        piece('trim', 1.025, 0.035, 0.11, -1.5375 + i * 1.025, 0.84, front + 0.1, { kind: 'trim' });
+    }
+    const board = null;
     [[0xf6f4ea, -1.2], [0xf2d860, -1.1], [0xf3a3b8, 0.9]].forEach(([color, x]) => {
         const stick = new Mesh(new CylinderGeometry(0.006, 0.006, 0.07), new MeshStandardMaterial({ color, roughness: 1 }));
         stick.position.set(x, 0.865, front + 0.1); stick.rotation.z = Math.PI / 2 + 0.2;
         scene.add(stick);
     });
     box(new MeshStandardMaterial({ color: 0x2b2b33, roughness: 0.9 }), 0.14, 0.04, 0.05, 1.5, 0.877, front + 0.1);
-    const statusCanvas = P.chalkLine(''), status = decal(P.texture(statusCanvas), 1.68, 0.1575, 1.12, 1.885, front + 0.064, { lit: true });   // under the detention box, clear of the lectern
+    const statusCanvas = P.chalkLine(''), status = mount(decal(P.texture(statusCanvas), 1.68, 0.1575, 1.12, 1.885, front + 0.064, { lit: true }));   // under the detention box, clear of the lectern
     status.material.alphaTest = 0;
     const SCROLLS = [['壊すな', 'Rule 1: No demolishing.'], ['柱は友達', 'The pillar is your friend.'], ['爆発禁止', 'No explosions. Yes, small ones too.'], ['廊下を走るな', 'No running from the blast radius.']];
     const scrolls = [-3.35, -2.6, 2.6, 3.35].map((x, i) => {
@@ -142,23 +154,24 @@ export function buildRoom(scene, { cjk }) {
         decal(P.scroll(...SCROLLS[i], cjk), 0.36, 1.08, 0, -0.56, 0, { parent: g });
         for (const y of [-0.02, -1.1]) { const rod = new Mesh(new CylinderGeometry(0.012, 0.012, 0.42), M.trim); rod.rotation.z = Math.PI / 2; rod.position.y = y; rod.position.z = 0.01; g.add(rod); }
         scene.add(g);
-        return g;
+        return mount(g);
     });
-    decal(P.sign('SAFETY FIRST', 'DAYS WITHOUT AN EXPLOSION', { size: 64, foot: 'record: ½' }), 0.84, 0.42, -1.55, 2.68, front + 0.035);
+    mount(decal(P.sign('SAFETY FIRST', 'DAYS WITHOUT AN EXPLOSION', { size: 64, foot: 'record: ½' }), 0.84, 0.42, -1.55, 2.68, front + 0.035));
     const flip = new Group(), card = decal(P.digit('0'), 0.075, 0.11, 0, 0, 0, { parent: flip });
     flip.position.set(-1.55, 2.54, front + 0.04);
-    scene.add(flip);
+    scene.add(mount(flip));
     const clock = new Group();
     clock.position.set(1.55, 2.68, front + 0.04);
     decal(P.clockFace(), 0.36, 0.36, 0, 0, 0.012, { parent: clock });
     const rim = new Mesh(new CylinderGeometry(0.19, 0.19, 0.04, 40), M.metal); rim.rotation.x = Math.PI / 2; clock.add(rim);
     const hand = (len, w, color) => { const h = new Group(), bar = new Mesh(new BoxGeometry(w, len, 0.004), new MeshStandardMaterial({ color })); bar.position.y = len * 0.4; h.add(bar); h.position.z = 0.026; clock.add(h); return h; };
     const hands = { hour: hand(0.09, 0.012, 0x151515), minute: hand(0.14, 0.008, 0x151515), second: hand(0.15, 0.003, 0xc02020) };
-    scene.add(clock);
-    box(new MeshStandardMaterial({ color: 0x3a3833, roughness: 0.8 }), 0.34, 0.22, 0.12, 0, 2.7, front + 0.06);
+    scene.add(mount(clock));
+    M.speaker = new MeshStandardMaterial({ color: 0x3a3833, roughness: 0.8 });
+    piece('speaker', 0.34, 0.22, 0.12, 0, 2.7, front + 0.06, { kind: 'speaker' });
 
     // The teacher's lectern, the confiscated detonator on it, and a letter home.
-    box(M.desk, 0.95, 1.05, 0.55, 0, 0.16 + 0.525, -3.8, { tile: 0.9 });
+    piece('desk', 0.95, 1.05, 0.55, 0, 0.16 + 0.525, -3.8, { tile: 0.9, kind: 'lectern' });
     const plunger = new Group(), top = 0.16 + 1.05;
     plunger.position.set(0.12, top, -3.78); plunger.rotation.y = -0.35;
     box(new MeshStandardMaterial({ color: 0x7a1a14, roughness: 0.6 }), 0.18, 0.13, 0.13, 0, 0.065, 0, { parent: plunger });
@@ -219,28 +232,28 @@ export function buildRoom(scene, { cjk }) {
     decal(P.passedNote(['u still got the big one?', 'under the floor', 'WHICH floor', 'ALL OF THEM']), 0.2, 0.25, 1.3, 0.004, 1.6, { rx: -Math.PI / 2, rz: 0.7 });
 
     // The back: cubbies, a hard hat, a hole that is not a hole, a prize, an extinguisher with advice.
-    const back = D / 2, cubby = new Group();
-    for (let k = 0; k <= 18; k++) box(M.chair, 0.025, 1.2, 0.36, -3.6 + k * 0.4, 0.6, back - 0.18, { parent: cubby, cast: false });
-    for (const y of [0.01, 0.4, 0.8, 1.2]) box(M.chair, 7.25, 0.025, 0.36, 0, y, back - 0.18, { parent: cubby, cast: false });
-    box(M.dark, 7.2, 1.2, 0.01, 0, 0.6, back - 0.005, { parent: cubby, cast: false });
+    const back = D / 2, cubby = new Group(), books = [];
+    for (let k = 0; k <= 18; k++) piece('chair', 0.025, 1.2, 0.36, -3.6 + k * 0.4, 0.6, back - 0.18, { tile: 0.9, kind: 'shelf' });
+    for (const y of [0.01, 0.4, 0.8, 1.2]) for (let k = 0; k < 6; k++) piece('chair', 7.25 / 6, 0.025, 0.36, -3.625 + 7.25 / 6 * (k + 0.5), y, back - 0.18, { tile: 0.9, kind: 'shelf' });
     scene.add(cubby);
-    for (let k = 0; k < 26; k++) {   // what students leave behind: books, shoeboxes, one lunchbox nobody will open
-        const col = Math.floor(Math.random() * 18), row = Math.floor(Math.random() * 3), w = 0.04 + Math.random() * 0.12, h = 0.1 + Math.random() * 0.2;
-        box(new MeshStandardMaterial({ color: [0x7a2f2f, 0x2f4f7a, 0xc9b27a, 0x3f6b46, 0xd8d2c4, 0x6b4a8a][k % 6], roughness: 0.8 }), w, Math.min(h, 0.36), 0.22, -3.4 + col * 0.4 + (Math.random() - 0.5) * 0.15, row * 0.4 + 0.025 + Math.min(h, 0.36) / 2, back - 0.2, { parent: cubby, cast: false });
-    }
+    const slots = [...Array(54).keys()].sort(() => Math.random() - 0.5).slice(0, 26);   // one thing per cubby: they are bodies now, and can't share
+    slots.forEach((slot, k) => {   // what students leave behind: books, shoeboxes, one lunchbox nobody will open. They fall off.
+        const col = slot % 18, row = Math.floor(slot / 18), w = 0.04 + Math.random() * 0.12, h = Math.min(0.34, 0.1 + Math.random() * 0.2);
+        books.push(box(new MeshStandardMaterial({ color: [0x7a2f2f, 0x2f4f7a, 0xc9b27a, 0x3f6b46, 0xd8d2c4, 0x6b4a8a][k % 6], roughness: 0.8 }), w, h, 0.22, -3.4 + col * 0.4 + (Math.random() - 0.5) * (0.36 - w), row * 0.4 + 0.0255 + h / 2, back - 0.2, { parent: cubby, cast: false }));
+    });
     const hat = new Mesh(new SphereGeometry(0.13, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), new MeshStandardMaterial({ color: 0xf2c418, roughness: 0.35 }));
     hat.position.set(-2.2, 1.213, back - 0.2); hat.scale.y = 0.85; hat.castShadow = true;
     const brim = new Mesh(new CylinderGeometry(0.16, 0.16, 0.012, 24), hat.material); brim.position.y = 0.006; hat.add(brim);
     scene.add(hat);
-    note('Property of D.B. NOT a helmet for indoor use. (It is. That is the problem.)', 'yellow', -2.2, 1.38, back - 0.006, Math.PI, 0.1, 36);
+    mount(note('Property of D.B. NOT a helmet for indoor use. (It is. That is the problem.)', 'yellow', -2.2, 1.38, back - 0.006, Math.PI, 0.1, 36));
     const notAHole = [decal(P.cracks(), 2.2, 2.2, 2.0, 2.0, back - 0.004, { ry: Math.PI })];
     notAHole.push(decal(P.glow(), 1.25, 0.85, 2.03, 1.98, back - 0.007, { ry: Math.PI, lit: false, blend: AdditiveBlending }));
     notAHole[1].material.color.set(0x8a6a44);   // daylight round the edges
     notAHole.push(decal(P.sign('FACILITY MANAGEMENT', 'THIS IS NOT A HOLE.', { bar: '#1f3d7a', size: 92, h: 640, foot: 'please stop asking' }), 1.05, 0.66, 2.0, 2.0, back - 0.012, { ry: Math.PI, rz: -0.04 }));
-    decal(P.sign('SCIENCE FAIR', "2nd PLACE: 'Volcano'", { bar: '#1d7a3a', size: 74, foot: 'judges were evacuated' }), 0.5, 0.25, 0.4, 1.75, back - 0.006, { ry: Math.PI, rz: 0.05 });
+    mount(decal(P.sign('SCIENCE FAIR', "2nd PLACE: 'Volcano'", { bar: '#1d7a3a', size: 74, foot: 'judges were evacuated' }), 0.5, 0.25, 0.4, 1.75, back - 0.006, { ry: Math.PI, rz: 0.05 }));
     const ext = new Mesh(new CylinderGeometry(0.075, 0.075, 0.5, 24), new MeshStandardMaterial({ color: 0xb3121a, roughness: 0.35, metalness: 0.1 }));
     ext.position.set(W / 2 - 0.18, 1.25, back - 0.6); ext.castShadow = true; scene.add(ext);
-    note('Use BEFORE. Not after.', 'yellow', W / 2 - 0.01, 1.62, back - 0.6, -Math.PI / 2, -0.08);
+    mount(note('Use BEFORE. Not after.', 'yellow', W / 2 - 0.01, 1.62, back - 0.6, -Math.PI / 2, -0.08));
 
     // Fluorescent lamps, off. Except the one hanging by a single wire, under its own scorch mark.
     const lamp = (x, z) => {
@@ -261,7 +274,8 @@ export function buildRoom(scene, { cjk }) {
     decal(P.scorch(), 1.8, 1.8, 2.3, H - 0.004, 1.5, { rx: Math.PI / 2, rz: 1.1 });
 
     bake(scene);
-    return { M, seats, desks, chairs, glass: panes, board, status, statusCanvas, scrolls, flip, card, hands, plunger, handle, eyes, lair, crooked, hat, ext, notAHole };
+    mounts.push(...notAHole);
+    return { M, pieces, mounts, books, seats, desks, chairs, board, status, statusCanvas, scrolls, flip, card, hands, plunger, handle, eyes, lair, crooked, hat, ext, notAHole };
 }
 
 /** Merge every static box that shares a material into one mesh: a few draw calls instead of hundreds. */
