@@ -7,6 +7,8 @@ import {
 import * as Props from './props.js';
 import { ConeGeometry, SphereGeometry } from 'three';
 import { axe, hammer } from './tools.js';
+import { createShafts } from './shafts.js';
+import { SUN } from './room.js';
 import { FONTS, letter } from './paint.js';
 
 const ROUND = 90, TILT = 0, TOOL_MASS = { axe: 1.8, hammer: 4.5 };   // kg: what a blow carries into what it hits   // TILT: extra tip of the head out of the fist (the grip pose already holds it upright)
@@ -40,7 +42,7 @@ const QUIPS = {
 // What a break is worth: by kind, and by how much of it there was.
 const VALUE = { wall: 260, board: 500, pane: 220, trim: 60, post: 320, door: 300, lectern: 900, speaker: 300, shelf: 80, frame: 160, fragment: 30, shard: 15, board_: 0, desk: 420, chair: 160, pot: 350, vase: 400, cat: 900, bust: 1200, volcano: 800, ext: 700 };
 
-export function createGame({ scene, renderer, rig, camera, room, audio, say, flip, physics, destruction }) {
+export function createGame({ scene, renderer, rig, camera, room, audio, say, flip, physics, destruction, light, shake }) {
     // One tool at a time, in one hand: the axe or the hammer. Squeeze the grip to swap, into whichever hand squeezed.
     const tools = [{ name: 'axe', mesh: axe() }, { name: 'hammer', mesh: hammer() }];
     const grips = [0, 1].map((i) => renderer.xr.getControllerGrip(i));
@@ -123,7 +125,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         if (state.phase !== 'intro') { sound.swap(); haptic(hand, 0.4, 30); animate(0.25, (f) => tool.mesh.scale.setScalar(0.5 + 0.5 * f + Math.sin(f * Math.PI) * 0.12)); }
     }
     // Tap to swap: a pinch with bare hands, or the trigger, or the grip, swaps axe and hammer into the hand that did it.
-    const swap = (i) => { if (state.phase !== 'intro') equip(1 - holder.tool, i); };
+    const swap = (i) => { if (state.phase === 'ready' || state.phase === 'play') equip(1 - holder.tool, i); };
     [0, 1].forEach((i) => { const c = renderer.xr.getController(i); c.addEventListener('select', () => swap(i)); c.addEventListener('squeezestart', () => swap(i)); });
     const active = () => tools[holder.tool];
 
@@ -252,7 +254,12 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     const ctx = () => audio()?.ctx;
     let noise = null, bus = null;
     const out = (c) => {
-        if (!bus) { bus = new DynamicsCompressorNode(c, { threshold: -14, knee: 8, ratio: 6, attack: 0.003, release: 0.2 }); bus.connect(c.destination); }
+        if (!bus) {   // through the room's reverb and the master (which muffles in slow motion and as he falls asleep)
+            bus = new DynamicsCompressorNode(c, { threshold: -14, knee: 8, ratio: 6, attack: 0.003, release: 0.2 });
+            const a = audio();
+            bus.connect(a?.master ?? c.destination);
+            if (a?.reverb) bus.connect(a.reverb);
+        }
         return bus;
     };
     function hiss(c, { dur, type, freq, to = freq, gain, q = 1, delay = 0 }) {
@@ -321,6 +328,31 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         glance() { const c = ctx(); if (!c) return; hiss(c, { dur: 0.18, type: 'bandpass', freq: 2600, to: 1500, gain: 0.3, q: 6 }); },
         tink(material) { const c = ctx(); if (!c) return; ping(c, (material === 'glass' ? 3000 : 2200) + Math.random() * 4000, 0.1, 0.025); },
         swap() { const c = ctx(); if (!c) return; hiss(c, { dur: 0.16, type: 'bandpass', freq: 800, to: 2400, gain: 0.25, q: 2 }); ping(c, 420, 0.08, 0.15, 0.12, 'triangle'); },
+        // The cinematic layer: the deep boom under a heavy break, the taiko that builds with a combo, the swell into slow motion,
+        // and the rising tension of the last ten seconds.
+        boom(e) { const c = ctx(); if (!c) return; ping(c, 62, 1.5, 0.25 + 0.5 * e, 0, 'sine', 30); hiss(c, { dur: 1.3, type: 'lowpass', freq: 260, to: 50, gain: 0.25 + 0.45 * e }); },
+        taiko(level) {
+            const c = ctx(); if (!c) return;
+            const g = Math.min(0.9, 0.3 + level * 0.07);
+            ping(c, 96, 0.75, g, 0, 'sine', 47); hiss(c, { dur: 0.14, type: 'lowpass', freq: 420, to: 110, gain: g * 0.7 });
+            if (level >= 4) ping(c, 1700, 0.05, 0.14, 0.13, 'square', 1500);   // the rim: ka
+            if (level >= 8) { ping(c, 92, 0.6, g * 0.8, 0.26, 'sine', 45); hiss(c, { dur: 0.12, type: 'lowpass', freq: 400, to: 110, gain: g * 0.5, delay: 0.26 }); }
+        },
+        whoom() {
+            const c = ctx(); if (!c) return;
+            const t = c.currentTime, s = new AudioBufferSourceNode(c, { buffer: noise, loop: true }), f = new BiquadFilterNode(c, { type: 'lowpass', frequency: 150, Q: 2 }), g = new GainNode(c, { gain: 0.0001 });
+            f.frequency.exponentialRampToValueAtTime(2600, t + 0.45); g.gain.exponentialRampToValueAtTime(0.35, t + 0.42); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
+            s.connect(f).connect(g).connect(out(c)); s.start(t); s.stop(t + 0.65);
+            ping(c, 45, 1.6, 0.45, 0.3, 'sine', 32);
+        },
+        riser(seconds) {   // two detuned saws climbing an octave, opening up, getting louder; cut dead at the bell
+            const c = ctx(); if (!c) return () => {};
+            const t = c.currentTime, f = new BiquadFilterNode(c, { type: 'lowpass', frequency: 250, Q: 3 }), g = new GainNode(c, { gain: 0.0001 });
+            f.frequency.exponentialRampToValueAtTime(2400, t + seconds); g.gain.exponentialRampToValueAtTime(0.12, t + seconds);
+            const os = [70, 70.8, 140.5].map((hz) => { const o = new OscillatorNode(c, { type: 'sawtooth', frequency: hz }); o.frequency.exponentialRampToValueAtTime(hz * 2, t + seconds); o.connect(f); o.start(t); return o; });
+            f.connect(g).connect(out(c));
+            return () => { const n = c.currentTime; g.gain.cancelScheduledValues(n); g.gain.setValueAtTime(g.gain.value, n); g.gain.linearRampToValueAtTime(0, n + 0.04); os.forEach((o) => o.stop(n + 0.06)); };
+        },
         bell(notes) { const c = ctx(); if (!c) return; notes.forEach((f, k) => { ping(c, f, 1.6, 0.25, k * 0.55); ping(c, f * 2.76, 0.8, 0.05, k * 0.55); }); },
     };
     const WESTMINSTER = [329.6, 261.6, 293.7, 196.0];   // the Japanese school bell
@@ -333,15 +365,15 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     const report = new Mesh(new PlaneGeometry(0.42, 0.56), new MeshBasicMaterial({ transparent: true, opacity: 0, side: 2, toneMapped: false }));   // paper white, not graded with the room
     report.visible = false;
     scene.add(report);
-    function showReport(total, kinds, grade) {
+    function showReport({ total, kinds, grade } = state.summary) {
         const pct = state.hits ? Math.round(state.right / state.hits * 100) : 0;
         const comment = total > 30000 ? 'Your child has demolished the classroom, the corridor and, we suspect, the concept of school.' : total > 15000 ? 'Shows real promise. The school does not.' : total > 5000 ? 'Tries hard. Breaks things. Could break more things.' : 'Your child was gentle with the furniture. We are worried.';
         report.material.map?.dispose();
-        report.material.map = letter('REPORT CARD: DEMOLITION', `Score: ${total}\nMaterials broken: ${kinds} of 6\nThings destroyed: ${state.broken}\nRight tool for the job: ${pct}%\nFollow-through: ${state.followThroughs} swings\nBest combo: x${state.bestCombo}\n\nGRADE: ${grade.split('.')[0]}\n\nTeacher's comment: ${comment}\n\nSwing hard to stay after class (again).`);
+        report.material.map = letter('REPORT CARD: DEMOLITION', `Score: ${total}\nMaterials broken: ${kinds} of 6\nThings destroyed: ${state.broken}\nRight tool for the job: ${pct}%\nFollow-through: ${state.followThroughs} swings\nBest combo: x${state.bestCombo}\n\nGRADE: ${grade.split('.')[0]}\n\nTeacher's comment: ${comment}\n\nPinch (or pull the trigger) to fall asleep again.`);
         report.material.needsUpdate = true;
         const head = camera.getWorldPosition(new Vector3()), ahead = camera.getWorldDirection(new Vector3()).setY(0).normalize();
-        report.position.copy(head).addScaledVector(ahead, 0.75).setY(head.y - 0.12);
-        report.lookAt(head.x, report.position.y, head.z);
+        report.position.copy(head).addScaledVector(ahead, 0.62).setY(head.y - 0.38);   // low, like a sheet held in front of you: the class stays in view above it
+        report.lookAt(head.x, head.y, head.z);
         report.visible = true;
         const y0 = report.position.y;
         animate(1.2, (f) => { report.material.opacity = f; report.position.y = y0 - 0.15 * (1 - f) ** 2; });
@@ -409,6 +441,49 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         if (piece.parts) onBreak(piece, { point, energy: e });
     }
 
+    // ---- Cinema ---------------------------------------------------------------------------------------------------
+    // Hit-stop: the world freezes for a few hundredths of a second when something heavy goes (never the camera: this is VR).
+    // Bullet-time for the landmarks: the board, the lectern, the first wall broken through, a big combo. The sound muffles
+    // and swells with it. Light pours through every hole in the walls.
+    const shafts = createShafts(scene, light);
+    const cine = { stop: 0, bulletAt: -9, bulletDur: 1, bulletDepth: 1 };
+    function timeScale(t) {
+        let s = t < state.slowUntil ? 0.15 + 0.85 * ((1.8 - (state.slowUntil - t)) / 1.8) ** 3 : 1;   // the final bell eases time back in
+        if (t < cine.stop) s = Math.min(s, 0.03);
+        const b = (t - cine.bulletAt) / cine.bulletDur;
+        if (b >= 0 && b < 1) s = Math.min(s, cine.bulletDepth + (1 - cine.bulletDepth) * b ** 2.4);
+        return s;
+    }
+    function bullet(now, depth = 0.22, dur = 1.0) {
+        if (now - cine.bulletAt < cine.bulletDur + 1.5) return;   // not back to back: it stops meaning anything
+        Object.assign(cine, { bulletAt: now, bulletDur: dur, bulletDepth: depth });
+        sound.whoom();
+        const a = audio();
+        if (a?.master) { const f = a.master.frequency, n = a.ctx.currentTime; f.cancelScheduledValues(n); f.setTargetAtTime(700, n, 0.03); f.setTargetAtTime(18000, n + dur * 0.6, 0.25); }
+    }
+    const LANDMARKS = ['board', 'lectern', 'desk', 'bust', 'cat', 'volcano', 'speaker', 'door'];
+    function moment(piece, kind, point, energy) {
+        const now = performance.now() / 1000, heavy = energy > 0.65 || (piece.volume ?? 0) > 0.04 || !!piece.parts;
+        if (heavy) { cine.stop = now + 0.035 + 0.05 * Math.min(1, energy); sound.boom(Math.min(1, energy)); shake?.(point, Math.min(1, energy + 0.2)); }
+        if (LANDMARKS.includes(kind) && !state.said.has(`moment:${kind}`)) { state.said.add(`moment:${kind}`); bullet(now); }
+        else if ([5, 10, 15, 20].includes(state.combo)) bullet(now, 0.3, 0.8);
+        if (state.combo >= 2) sound.taiko(state.combo);
+    }
+    // Is there a hole through to outside where this broke? Look along the wall's thickness, through what is still fixed.
+    function holeCheck(piece, point) {
+        const s = piece.size, e = piece.matrix.elements, pos = new Vector3(e[12], e[13], e[14]);
+        const axis = s.x < s.y && s.x < s.z ? 'x' : s.y < s.z ? 'y' : 'z';
+        if (axis === 'y' || Math.abs(pos[axis]) < 4.2) return;   // only the outer walls open onto anything
+        const inward = new Vector3(); inward[axis] = -Math.sign(pos[axis]);
+        const from = point.clone(); from[axis] = pos[axis] + inward[axis] * 0.6;
+        const ray = new RAPIER.Ray({ x: from.x, y: from.y, z: from.z }, { x: -inward.x, y: 0, z: -inward.z });
+        if (physicsWorld.castRay(ray, 1.2, true, undefined, undefined, undefined, undefined, (c) => !!destruction.pieceOf(c)?.anchored)) return;
+        const at = point.clone(); at[axis] = pos[axis] - inward[axis] * (s[axis] / 2 + 0.05);
+        const size = Math.min(...['x', 'y', 'z'].filter((a) => a !== axis).map((a) => s[a])) * 0.9;
+        shafts.open(at, inward, size, axis === 'x' && pos.x < 0 ? SUN : null);
+        if (!state.said.has('moment:through')) { state.said.add('moment:through'); bullet(performance.now() / 1000, 0.25, 1.2); say('YOU CAN SEE THE PARK NOW.'); }
+    }
+
     // Every break, by tool or by gravity, lands here: sound, dust, the haze in the light, the score and the board's opinion.
     function onBreak(piece, { point, energy = 0.5 }) {
         const now = performance.now() / 1000, material = piece.material, kind = piece.kind;
@@ -418,8 +493,10 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         if (material === 'plaster' || material === 'slate') { puff(dust, point, 50, { color: material === 'slate' ? 0xb8bcb4 : 0xe4ded0, spread: 0.25, speed: 0.6, size: 0.22, life: 4 }); state.dust = Math.min(2.6, state.dust + 0.25); }
         if (kind === 'volcano') { sound.erupt(); for (let k = 0; k < 6; k++) setTimeout(() => puff(dust, point.clone().setY(point.y + 0.1), 12, { color: k % 2 ? 0xff6a2a : 0xffe6a0, speed: 1.6, up: 3, size: 0.1, life: 2, dir: new Vector3(0, 1, 0) }), k * 90); }
         if (kind === 'pot') burst('plaster', point, new Vector3(0, 1, 0), 18, 1.5, [0x3a2414, 0x4a301a, 0x3f7a33]);   // soil, and the plant
-        if (piece.generation > 0 && kind !== 'pane') return;   // breaking up rubble: the sound and the dust, not the score
+        if (piece.generation > 0 && kind !== 'pane') { if (piece.anchored !== undefined && ['wall', 'post', 'door', 'board', 'frame'].includes(kind)) setTimeout(() => holeCheck(piece, point), 450); return; }   // breaking up rubble: the sound and the dust, not the score
         score(piece, kind, material, blow?.e ?? energy, blow?.affinity ?? 1, !blow);
+        moment(piece, kind, point, blow?.e ?? energy);
+        if (['wall', 'post', 'door', 'board', 'frame', 'speaker'].includes(kind) && !piece.parts && !piece.prop) setTimeout(() => holeCheck(piece, point), 450);
         if (kind === 'wall' && Math.abs(point.x - 2.0) < 0.6 && Math.abs(point.y - 2.0) < 0.5 && point.z > 4) return say('OK. IT WAS A HOLE.');
         const quips = QUIPS[kind];
         if (quips && (Math.random() < 0.45 || !state.said.has(kind))) { state.said.add(kind); say(state.combo > 2 ? `COMBO x${state.combo}! ${quips[Math.floor(Math.random() * quips.length)]}` : quips[Math.floor(Math.random() * quips.length)]); }
@@ -488,30 +565,41 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     function start(now) {
         state.phase = 'play'; state.endsAt = now + ROUND;
         report.visible = false;
+        destruction.dirty = true;
         sound.bell(WESTMINSTER);
         say('LESSON 2: DEMOLITION. 90 SECONDS. GO.');
     }
     function finish() {
         state.phase = 'over';
+        state.riser?.(); state.riser = null;
         sound.bell([...WESTMINSTER].reverse());
         const kinds = MATERIALS.filter((k) => state.materials.has(k)).length, total = state.score + kinds * kinds * 400;
         const grade = total > 40000 ? 'A+ (PLEASE LEAVE)' : total > 20000 ? 'B. SHOWS PROMISE. THE SCHOOL DOES NOT.' : total > 7000 ? 'C. NEEDS MORE DEMOLITION.' : 'F. GENTLE. SUSPICIOUSLY GENTLE.';
         say(`PENCILS DOWN. ${total} PTS, ${kinds}/6 MATERIALS. ${grade}`);
-        state.total = total;
+        state.total = total; state.summary = { total, kinds, grade };
         state.finishedAt = performance.now() / 1000;
         state.slowUntil = state.finishedAt + 1.8;   // the bell: everything in the air hangs for a moment
         writeTag('0:00', true);
-        setTimeout(() => state.phase === 'over' && showReport(total, kinds, grade), 2200);
     }
-    function reset() {
+    function clearRoom() {   // the whole room, put back: walls, glass, furniture, everything on the shelves, the light
         for (const tool of tools) if (tool.lodged) free(tool, false);
-        destruction.reset();   // the whole room, put back: walls, glass, furniture, everything on the shelves
+        destruction.reset();
+        shafts.clear();
         for (const pool of Object.values(debris)) { pool.parts.forEach((d, i) => { d.alive = false; pool.mesh.setMatrixAt(i, hidden); }); pool.mesh.instanceMatrix.needsUpdate = true; }
         for (const cloud of [dust, sparks]) cloud.life.fill(0);
         for (const c of craters) c.visible = false;
         renderer.shadowMap.needsUpdate = true;
         report.visible = false; ext.spent = false;
+        state.riser?.(); state.riser = null;
         anims.length = 0;
+    }
+    /** Waking up: the room is whole, it was a dream; the score stays for the report card. */
+    function backToClass() {
+        clearRoom();
+        state.phase = 'awake'; state.dust = 0; state.slowUntil = 0;
+    }
+    function reset() {
+        clearRoom();
         Object.assign(state, { phase: 'ready', ...fresh() });
         writeTag('1:30');
         say('TUESDAY (AGAIN). SWING TO START.');
@@ -585,9 +673,11 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     const world = new Vector3(), dir = new Vector3(), heads = tools.map(() => ({ p: new Vector3(), speed: 0 }));
     function update(t, dt) {
         state.dust *= Math.exp(-dt / 35);
-        for (const tool of tools) tool.mesh.visible = state.phase !== 'intro' && (tool === active() || !!tool.lodged);
+        const armed = state.phase === 'ready' || state.phase === 'play' || state.phase === 'over';   // the tools exist only in the dream
+        for (const tool of tools) tool.mesh.visible = armed && (tool === active() || !!tool.lodged);
         for (let i = anims.length - 1; i >= 0; i--) { const a = anims[i]; a.t += dt; const f = Math.min(1, a.t / a.dur); a.run(f); if (f === 1) { anims.splice(i, 1); a.done?.(); } }
-        const slow = t < state.slowUntil ? 0.15 + 0.85 * ((1.8 - (state.slowUntil - t)) / 1.8) ** 3 : 1;   // the final bell eases time back in
+        const slow = timeScale(t);
+        shafts.update(dt, light.tint.value);
         stepCloud(dust, dt * slow, 0.02); stepCloud(sparks, dt * slow, 6);
         if (t < state.powderUntil && !ext.gone) {   // the extinguisher, finally used: it sprays, and the spray shoves it round the floor
             const tt = ext.body.translation(), r = ext.body.rotation(), nozzle = new Vector3(0, 0.3, 0).applyQuaternion(new Quaternion(r.x, r.y, r.z, r.w));
@@ -599,7 +689,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         destruction.update(dt);
         if (moving && (state.frame = (state.frame ?? 0) + 1) % 2 === 0) renderer.shadowMap.needsUpdate = true;   // moving things move their shadows
         if (renderer.xr.isPresenting) syncAnchors();
-        if (!renderer.xr.isPresenting || state.phase === 'intro') { stepDebris(dt * slow); return; }
+        if (!renderer.xr.isPresenting || !armed) { stepDebris(dt * slow); steer(toolBody, null); steer(handBody, null); return; }
         locomote(dt);
         if (state.phase === 'play' && t > state.endsAt) finish();
         if (state.phase === 'play' && Math.ceil(state.endsAt - t) !== state.shown) {
@@ -607,6 +697,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
             writeTag(`${Math.floor(state.shown / 60)}:${String(state.shown % 60).padStart(2, '0')}`, state.shown <= 10);
             if (state.shown <= 10 || state.shown % 15 === 0) say(`${state.shown}s LEFT  ·  SCORE ${state.score}`);
             if (state.shown <= 10 && ctx()) { ping(ctx(), state.shown <= 3 ? 1900 : 1500, 0.06, 0.25, 0, 'square'); haptic(1, 0.15, 15); }   // the last ten seconds tick, loud, in the hand
+            if (state.shown === 10 && !state.riser) state.riser = sound.riser(10);
         }
         for (const h of heads) h.speed = 0;
         if (holder.hand === null) equip(0);
@@ -642,7 +733,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
             if (t < (tool.settle ?? 0)) { tool.vel.set(0, 0, 0); tool.samples = null; return; }
             heads[0].p.copy(world); heads[0].speed = speed;
             if (speed > 1.2 && state.phase === 'ready') start(t);
-            if (state.phase === 'over') { if (speed > 3 && t - state.finishedAt > 4) reset(); tool.samples = null; return; }
+            if (state.phase === 'over') { tool.samples = null; return; }
             sweep(tool, i, speed, t);
         });
         personality(t, dt, heads);
@@ -668,5 +759,5 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
             if (moved) pool.mesh.instanceMatrix.needsUpdate = true;
         }
     }
-    return { update, state, tools, props, hat, ext, books, plunger, reset, start, finish, equip, holder, report, destruction };
+    return { update, state, tools, props, hat, ext, books, plunger, reset, start, finish, equip, holder, report, destruction, showReport, backToClass, shafts, cine };
 }

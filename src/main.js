@@ -11,6 +11,7 @@ import { chalkLine, FONTS, hasGlyphs } from './paint.js';
 import { createGame } from './game.js';
 import { createPhysics } from './physics.js';
 import { createDestruction } from './destruction.js';
+import { createStory } from './story.js';
 
 const params = new URLSearchParams(location.search);
 const button = document.getElementById('enter');
@@ -67,6 +68,14 @@ function startAudio() {
     if (audio) return audio.ctx.resume();
     const listener = new AudioListener(), ctx = listener.context, out = listener.getInput();
     camera.add(listener);
+    // Everything ends in a master filter (it muffles as he falls asleep, and in slow motion), with a room reverb on a send.
+    const master = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 18000, Q: 0.5 });
+    master.connect(ctx.destination);
+    listener.gain.disconnect(); listener.gain.connect(master);
+    const ir = ctx.createBuffer(2, ctx.sampleRate * 2.2, ctx.sampleRate);   // a wooden room: a short, bright, decaying tail
+    for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 3.2) * (i < ctx.sampleRate * 0.012 ? 0 : 1); }
+    const reverb = new ConvolverNode(ctx, { buffer: ir }), wet = new GainNode(ctx, { gain: 0.28 });
+    reverb.connect(wet).connect(master);
     const noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), data = noise.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
     const at = (x, y, z) => { const p = new PannerNode(ctx, { panningModel: 'HRTF', refDistance: 1.5, positionX: x, positionY: y, positionZ: z }); p.connect(out); return p; };
@@ -94,10 +103,10 @@ function startAudio() {
     hiss.start(); lfo.start(); slow.start();
     const clock = at(1.55, 2.68, -D / 2), desk = at(0.12, 1.3, -3.78), ceiling = at(2.2, H, 1.5), lair = at(room.lair.x, 0.6, room.lair.z);
     audio = {
-        ctx, hush, out,
+        ctx, hush, out, master, reverb, tickGain: 0.25,
         scratch: () => burst(desk, { dur: 0.05 + Math.random() * 0.05, type: 'bandpass', freq: 2400 + Math.random() * 1500, gain: 0.12, q: 5 }),
         whistle: () => { tone(out, { from: 500, to: 1500, dur: 0.35, gain: 0.07, type: 'sine' }); setTimeout(() => tone(out, { from: 1500, to: 1400, dur: 0.25, gain: 0.05, type: 'triangle' }), 330); },
-        tick: (odd) => burst(clock, { dur: 0.04, type: 'highpass', freq: odd ? 3000 : 2200, gain: 0.25 }),
+        tick: (odd) => burst(clock, { dur: 0.04, type: 'highpass', freq: odd ? 3000 : 2200, gain: audio.tickGain }),
         click: () => burst(desk, { dur: 0.06, type: 'highpass', freq: 1800, gain: 0.6 }),
         pfft: () => { burst(desk, { dur: 0.7, type: 'bandpass', freq: 1400, to: 300, gain: 0.5, q: 2 }); tone(desk, { from: 700, to: 180, dur: 0.6, gain: 0.08, type: 'triangle' }); },
         boom: () => { burst(desk, { dur: 2.6, freq: 600, to: 40, gain: 1.6 }); tone(desk, { from: 90, to: 28, dur: 2.2, gain: 0.9 }); burst(ceiling, { dur: 1.4, type: 'highpass', freq: 3000, to: 900, gain: 0.25 }); },
@@ -169,25 +178,45 @@ function explode() {
 
 // The look. Morten's room as built is an even, sunny afternoon (?look=built). The game plays it as a film frame:
 // one hard warm sun, the fills pulled down and cooled so the shadows go deep and blue, and the beams carry the shot.
+// The real class (the story, waking up) is the opposite: no sun, an overcast sky, fluorescent tubes, everything flat.
 const LOOKS = {
     built: { sun: 7, sky: 1.1, bounce: 0.22, env: 0.22, exposure: 1.05, haze: 1, skyColor: 0xcfdcf2 },
     film: { sun: 10, sky: 0.34, bounce: 0.09, env: 0.07, exposure: 1.0, haze: 1.5, skyColor: 0x7f98d6 },
+    boring: { sun: 0, sky: 1.0, bounce: 0.8, env: 0.65, haze: 0.45, skyColor: 0xdfe5ec },
 };
+// Over the ninety seconds the sun goes down: gold, then orange, then red at the bell.
+const SUNSET = [new Color(0xffd9a6), new Color(0xffa060), new Color(0xff7040)], TINTS = [new Color(1, 0.86, 0.62), new Color(1, 0.66, 0.4), new Color(1, 0.52, 0.3)];
+const ramp = (stops, f, out) => { const x = Math.min(0.999, Math.max(0, f)) * (stops.length - 1), i = Math.floor(x); return out.copy(stops[i]).lerp(stops[i + 1], x - i); };
+const GREY = new Color(0x8c9298), WHITE = new Color(0xffffff), sunColor = new Color(), tintColor = new Color();
 const builtLook = params.get('look') === 'built';
 const look = { ...(builtLook ? LOOKS.built : LOOKS.film), fill: 1 };   // fill: how much of the fill light is let in (0..1), animated by the opening and the end
 skylight.color.set(look.skyColor);
+let wasBoring = null;
 function applyLook(target, dt) {
-    const k = 1 - Math.exp(-dt * 1.5);
-    look.fill += (target.fill - look.fill) * k;
-    sun.intensity += (target.sun - sun.intensity) * k;
-    skylight.intensity = look.sky * look.fill;
-    bounce.intensity = look.bounce * look.fill;
-    if (!params.has('sunonly')) scene.environmentIntensity = look.env * look.fill;
-    light.haze.value += (target.haze - light.haze.value) * k;
+    const boring = !!target.boring, k = boring !== wasBoring ? 1 : 1 - Math.exp(-dt * 1.5);   // between the class and the dream: a cut, behind closed eyes
+    wasBoring = boring;
+    const base = boring ? LOOKS.boring : look;
+    look.fill += ((boring ? 1 : target.fill) - look.fill) * k;
+    sun.intensity += ((boring ? 0 : target.sun) - sun.intensity) * k;
+    skylight.intensity += (base.sky * look.fill - skylight.intensity) * k;
+    bounce.intensity += (base.bounce * look.fill - bounce.intensity) * k;
+    if (!params.has('sunonly')) scene.environmentIntensity += (base.env * look.fill - scene.environmentIntensity) * k;
+    light.haze.value += ((boring ? LOOKS.boring.haze : target.haze) - light.haze.value) * k;
+    light.day.value += ((boring ? 0 : 1) - light.day.value) * k;
+    skylight.color.lerp(new Color(base.skyColor), k);
+    sun.color.lerp(target.sunColor ?? SUNSET[0], k);
+    light.tint.value.lerp(target.tint ?? TINTS[0], k);
+    for (const o of room.outside) o.material.color.lerp(boring ? GREY : WHITE, k);
 }
 if (!params.has('exposure')) renderer.toneMappingExposure = look.exposure;
 
-const game = createGame({ scene, renderer, rig, camera, room, physics, destruction, audio: () => audio, say: write, flip: () => { state.flipAt = performance.now() / 1000; } });
+// When something heavy goes, the building knows: the lamp on its one wire swings, plaster sifts down from the ceiling.
+const shake = (point, e) => {
+    state.lampSpin += 1.6 * e;
+    spawn(Math.round(20 + 50 * e), new Vector3(point.x, H - 0.05, point.z), new Vector3(1.6, 0.02, 1.6), 0.12, PLASTER, -1);
+};
+const game = createGame({ scene, renderer, rig, camera, room, physics, destruction, light, shake, audio: () => audio, say: write, flip: () => { state.flipAt = performance.now() / 1000; } });
+const story = createStory({ scene, camera, rig, room, audio: () => audio, write, params });
 
 // The desk that looks back: blinks now and then, and hides if you stare.
 function updateEyes(t, head) {
@@ -203,7 +232,11 @@ function updateEyes(t, head) {
 const controllers = [0, 1].map((i) => {
     const c = renderer.xr.getController(i);
     c.add(new Line(new BufferGeometry().setFromPoints([new Vector3(), new Vector3(0, 0, -0.4)]), new LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35 })));
-    c.addEventListener('select', () => { if (pointsAtPlunger(c)) push(); });
+    c.addEventListener('select', () => {
+        if (game.state.phase === 'story') return story.skip();   // a tap in the class: straight to the heavy eyes
+        if (game.state.phase === 'awake' && story.state.mode === 'awake') return dream(true);   // with the report card: back under
+        if (pointsAtPlunger(c)) push();
+    });
     rig.add(c);
     const grip = renderer.xr.getControllerGrip(i), hand = renderer.xr.getHand(i);
     rig.add(grip, hand);
@@ -247,6 +280,14 @@ const veil = new Mesh(new SphereGeometry(0.3, 16, 8), new MeshBasicMaterial({ co
 veil.renderOrder = 999; veil.visible = false; camera.add(veil);
 const intro = { at: -1, written: 0, lastPhase: null };
 const TITLE = 'DEMOLITION BOY', CUE = 'LESSON 2: DEMOLITION. SWING TO START.';
+// The real class first, then the dream. The second time round, the class is brief.
+function dream(short) {
+    game.state.phase = 'story';
+    if (params.get('story') === 'skip') { story.hide(); return beginOpening(); }
+    let seen = false;
+    try { seen = localStorage.getItem('demolitionboy_story') === '1'; } catch {}
+    story.enter({ short: short || seen }, () => { try { localStorage.setItem('demolitionboy_story', '1'); } catch {} beginOpening(); });
+}
 function beginOpening() {
     if (game.state.phase !== 'intro') game.reset();   // a second visit starts clean
     intro.at = performance.now() / 1000; intro.written = 0;
@@ -315,23 +356,35 @@ renderer.setAnimationLoop((now) => {
     room.crooked.g.rotation.z = -0.62 + state.lampAngle * 0.35 + Math.sin(t * 0.8) * 0.012;
     state.flicker = Math.max(0, state.flicker - dt);
     const buzzing = state.flicker > 0 ? Math.random() > 0.5 : Math.sin(t * 0.5) > 0.97 && Math.random() > 0.6;
-    room.crooked.tubes.emissiveIntensity = buzzing ? 2.2 : 0.05;
+    room.crooked.tubes.emissiveIntensity = story.state.boring ? (buzzing ? 0.3 : 1.8) : buzzing ? 2.2 : 0.05;   // on in the real class (and still buzzing)
     const flip = Math.min(1, (t - state.flipAt) / 0.6);
     room.flip.rotation.x = flip < 1 ? -flip * Math.PI * 2 : 0;
     updateEyes(t, head);
+    story.update(t, dt);
     game.update(t, dt);
     opening(t, dt);
     const phase = game.state.phase;
+    // The end of the dream: the bell, the slow motion, a held shot of the wreckage in the last of the sun; then a blink,
+    // and he's at his desk. The room is whole. Everyone is looking at him.
+    if (phase === 'over' && !intro.waking && t > game.state.finishedAt + 4.6) {
+        intro.waking = true;
+        story.wake(game.tools[0].mesh, () => game.backToClass(), () => game.showReport());
+    }
+    if (phase !== 'over') intro.waking = false;
+    const progress = phase === 'play' ? 1 - Math.max(0, game.state.endsAt - t) / 90 : phase === 'over' ? 1 : 0;
     applyLook({
+        boring: !builtLook && story.state.boring,
         fill: builtLook ? 1 : intro.at >= 0 ? 0.3 : phase === 'over' ? 0.45 : 1,   // the held moment and the end are nearly all sun
-        sun: builtLook ? LOOKS.built.sun : phase === 'over' ? 11.5 : look.sun,
-        haze: builtLook ? 1 : (phase === 'intro' ? 1.9 : look.haze) + game.state.dust,
+        sun: builtLook ? LOOKS.built.sun : phase === 'over' ? 12 : look.sun + progress * 2,
+        haze: builtLook ? 1 : (phase === 'intro' ? 1.9 : phase === 'over' ? 2.4 : look.haze) + game.state.dust,
+        sunColor: ramp(SUNSET, progress, sunColor), tint: ramp(TINTS, progress, tintColor),
     }, dt);
     if (audio && phase !== intro.lastPhase) {
         intro.lastPhase = phase;
-        const hushTo = phase === 'play' ? 0.05 : 1;   // cicadas fall silent for the demolition, come back after the bell
-        audio.hush.gain.setTargetAtTime(hushTo, audio.ctx.currentTime, phase === 'play' ? 0.3 : 2.5);
+        const hushTo = phase === 'play' ? 0.05 : story.state.boring || phase === 'story' || phase === 'awake' ? 0.08 : 1;   // windows shut in class; in the dream they fall silent for the demolition
+        audio.hush.gain.setTargetAtTime(hushTo, audio.ctx.currentTime, phase === 'play' ? 0.3 : 1.5);
     }
+    if (audio) audio.tickGain = story.state.boring ? 0.6 : 0.25;   // in class, the clock is very loud
 
     // The clock runs backwards. It is the only honest clock in the building.
     const d = new Date(), sec = d.getSeconds() + d.getMilliseconds() / 1000;
@@ -364,8 +417,8 @@ button.addEventListener('click', async () => {
     startAudio();
     const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'hand-tracking'] });
     await renderer.xr.setSession(session);
-    beginOpening();
+    dream(false);
     document.body.classList.add('immersive');
     session.addEventListener('end', () => document.body.classList.remove('immersive'));
 });
-Object.assign(globalThis, { classroom: { renderer, scene, camera, rig, room, state, push, game, physics, destruction } });   // for the console and tests
+Object.assign(globalThis, { classroom: { renderer, scene, camera, rig, room, state, push, game, physics, destruction, story, light, sun } });   // for the console and tests

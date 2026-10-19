@@ -1,7 +1,7 @@
 // Demolition Boy's classroom: an old wooden Japanese schoolroom, empty, with evidence.
 // Built from boxes with world-scaled UVs, so one painted metre of wood is a metre everywhere.
 import {
-    AdditiveBlending, BoxGeometry, BufferGeometry, CylinderGeometry, DoubleSide, Euler, Float32BufferAttribute, Group, InstancedMesh,
+    AdditiveBlending, BoxGeometry, BufferGeometry, Color, CylinderGeometry, DoubleSide, Euler, Float32BufferAttribute, Group, InstancedMesh,
     Matrix4, Mesh, MeshBasicMaterial, MeshStandardMaterial, PlaneGeometry, Points, Quaternion, ShaderMaterial, SphereGeometry, Vector3, Vector4,
 } from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
@@ -116,11 +116,9 @@ export function buildRoom(scene, { cjk }) {
         for (let k = 1; k < 4; k++) for (const dz of [-cw, cw]) piece('trim', 0.06, 0.03, cw * 2, -W / 2 - 0.08, SILL + ch * k, c + dz, { kind: 'trim' });
     }
     mount(note('This window has been tested. From both sides.', 'blue', -W / 2 - 0.05, 1.55, 1.4, Math.PI / 2));
-    decal(P.outside(), 46, 18, -16, 5, 0, { ry: Math.PI / 2, lit: false });
-    // What is outside the other walls, for when they are not there any more: the same overexposed summer.
-    decal(P.outside(), 46, 18, 0, 5, -16, { lit: false });
-    decal(P.outside(), 46, 18, 0, 5, 16, { ry: Math.PI, lit: false });
-    decal(P.outside(), 46, 18, 16, 5, 0, { ry: -Math.PI / 2, lit: false });
+    // What is outside: an overexposed summer (overcast, in the real class). Outside the other walls too, for when they are not there any more.
+    const outside = [decal(P.outside(), 46, 18, -16, 5, 0, { ry: Math.PI / 2, lit: false }), decal(P.outside(), 46, 18, 0, 5, -16, { lit: false }),
+        decal(P.outside(), 46, 18, 0, 5, 16, { ry: Math.PI, lit: false }), decal(P.outside(), 46, 18, 16, 5, 0, { ry: -Math.PI / 2, lit: false })];
 
     // AO by hand: soft dark strips where walls meet floor and ceiling.
     const strip = P.gradientStrip(), shade = (w, h, x, y, z, rx, ry) => decal(strip, w, h, x, y, z, { rx, ry, lit: false });
@@ -255,7 +253,8 @@ export function buildRoom(scene, { cjk }) {
     ext.position.set(W / 2 - 0.18, 1.25, back - 0.6); ext.castShadow = true; scene.add(ext);
     mount(note('Use BEFORE. Not after.', 'yellow', W / 2 - 0.01, 1.62, back - 0.6, -Math.PI / 2, -0.08));
 
-    // Fluorescent lamps, off. Except the one hanging by a single wire, under its own scorch mark.
+    // Fluorescent lamps, off. Except the one hanging by a single wire, under its own scorch mark. (On, in the real class.)
+    const lamps = [];
     const lamp = (x, z) => {
         const g = new Group();
         box(M.metal, 1.3, 0.05, 0.17, 0.62, 0, 0, { parent: g, cast: false });
@@ -263,6 +262,7 @@ export function buildRoom(scene, { cjk }) {
         for (const dz of [-0.045, 0.045]) { const t = new Mesh(new CylinderGeometry(0.016, 0.016, 1.22, 12), tubes); t.rotation.z = Math.PI / 2; t.position.set(0.62, -0.04, dz); g.add(t); }
         g.position.set(x - 0.62, H - 0.72, z);
         scene.add(g);
+        lamps.push(tubes);
         return { g, tubes };
     };
     const wire = (x, z, len) => { const w = new Mesh(new CylinderGeometry(0.003, 0.003, len), M.dark); w.position.set(x, H - len / 2, z); scene.add(w); };
@@ -275,7 +275,7 @@ export function buildRoom(scene, { cjk }) {
 
     bake(scene);
     mounts.push(...notAHole);
-    return { M, pieces, mounts, books, seats, desks, chairs, board, status, statusCanvas, scrolls, flip, card, hands, plunger, handle, eyes, lair, crooked, hat, ext, notAHole };
+    return { M, pieces, mounts, books, lamps, outside, seats, desks, chairs, board, status, statusCanvas, scrolls, flip, card, hands, plunger, handle, eyes, lair, crooked, hat, ext, notAHole };
 }
 
 /** Merge every static box that shares a material into one mesh: a few draw calls instead of hundreds. */
@@ -297,7 +297,7 @@ function bake(scene) {
 /** Sunbeams: sheets along the light through each bay, masked by the window bars; dust that only shows inside them. */
 export function buildLight(scene) {
     const mask = /* glsl */`
-        uniform vec3 sun; uniform vec4 bays[4]; uniform float time; uniform float haze;
+        uniform vec3 sun; uniform vec4 bays[4]; uniform float time; uniform float haze; uniform float day; uniform vec3 tint;
         float inBeam(vec3 p) {
             float t = (${(-W / 2).toFixed(2)} - p.x) / sun.x;   // walk back along the light to the window plane
             vec2 q = p.zy + sun.zy * t;
@@ -311,7 +311,7 @@ export function buildLight(scene) {
             }
             return m * step(0., t) * exp(-t * .12);
         }`;
-    const uniforms = { sun: { value: SUN }, bays: { value: WINDOWS.map(([a, b]) => new Vector4(a, SILL, b, HEAD)) }, time: { value: 0 }, haze: { value: 1 } };   // haze: how much is in the air; the beams thicken as the room comes down
+    const uniforms = { sun: { value: SUN }, bays: { value: WINDOWS.map(([a, b]) => new Vector4(a, SILL, b, HEAD)) }, time: { value: 0 }, haze: { value: 1 }, day: { value: 1 }, tint: { value: new Color(1, 0.86, 0.62) } };   // day: is the sun out at all; tint: its colour, which reddens towards the bell   // haze: how much is in the air; the beams thicken as the room comes down
     // Sheets: for each bay, a fan of planes containing the light direction, spread across the bay.
     const positions = [], down = SUN.clone().negate();
     for (const [a, b] of WINDOWS) for (let k = 0; k < 7; k++) {
@@ -329,7 +329,7 @@ export function buildLight(scene) {
             void main() {
                 float near = smoothstep(.3, 1.2, distance(vP, cameraPosition));
                 float m = inBeam(vP) * near * step(0., vP.y);
-                gl_FragColor = vec4(vec3(1., .86, .62) * m * .035 * haze, 1.);
+                gl_FragColor = vec4(tint * m * .035 * haze * day, 1.);
             }`,
     }));
     beams.frustumCulled = false;
@@ -345,12 +345,12 @@ export function buildLight(scene) {
             void main() {
                 vec3 p = position + vec3(sin(time * .11 + position.y * 3.), sin(time * .07 + position.x * 2.) * .5 - .2, cos(time * .09 + position.z * 3.)) * .25;
                 p.y = mod(p.y, ${H.toFixed(1)});
-                vB = .06 / haze + inBeam(p) * (.6 + .4 * haze);   // in a thick haze the shadows go dark and the beams go solid
+                vB = .06 / max(haze, .3) + inBeam(p) * (.6 + .4 * haze) * day;   // in a thick haze the shadows go dark and the beams go solid
                 vec4 mv = modelViewMatrix * vec4(p, 1.);
                 gl_PointSize = clamp(5. / -mv.z, 1., 6.);
                 gl_Position = projectionMatrix * mv;
             }`,
-        fragmentShader: 'varying float vB; void main() { float d = length(gl_PointCoord - .5); gl_FragColor = vec4(vec3(1., .9, .7) * vB * smoothstep(.5, 0., d) * .5, 1.); }',
+        fragmentShader: 'uniform vec3 tint; varying float vB; void main() { float d = length(gl_PointCoord - .5); gl_FragColor = vec4(mix(vec3(.9), tint, .8) * vB * smoothstep(.5, 0., d) * .5, 1.); }',
     }));
     motes.frustumCulled = false;
     scene.add(motes);

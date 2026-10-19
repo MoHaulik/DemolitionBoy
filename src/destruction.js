@@ -401,6 +401,8 @@ export function createDestruction({ scene, physics, room }) {
     // Stay after class: the room as it was. Every piece, pane and board; the furniture where it stood; things back on shelves.
     const mountHomes = room.mounts.map((o) => ({ o, parent: o.parent, position: o.position.clone(), quaternion: o.quaternion.clone() }));
     function reset() {
+        if (!api.dirty) return;   // untouched since the last time: nothing to put back
+        api.dirty = false;
         waiting.clear(); pendingRelease.length = 0; incoming.length = 0;
         for (const p of new Set(pieces.values())) if (!p.parts && !p.prop) dropPiece(p);
         for (const p of [...live]) dropPiece(p);
