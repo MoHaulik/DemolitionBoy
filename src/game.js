@@ -353,6 +353,14 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
             f.connect(g).connect(out(c));
             return () => { const n = c.currentTime; g.gain.cancelScheduledValues(n); g.gain.setValueAtTime(g.gain.value, n); g.gain.linearRampToValueAtTime(0, n + 0.04); os.forEach((o) => o.stop(n + 0.06)); };
         },
+        groan() {   // timber and plaster giving way: a low, wavering creak, then the crackle of it letting go
+            const c = ctx(); if (!c) return;
+            const t = c.currentTime, o = new OscillatorNode(c, { type: 'sawtooth', frequency: 58 }), lfo = new OscillatorNode(c, { frequency: 5.5 }), depth = new GainNode(c, { gain: 9 });
+            const f = new BiquadFilterNode(c, { type: 'bandpass', frequency: 320, Q: 5 }), g = new GainNode(c, { gain: 0.0001 });
+            o.frequency.linearRampToValueAtTime(41, t + 0.5); g.gain.exponentialRampToValueAtTime(0.32, t + 0.12); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.55);
+            lfo.connect(depth).connect(o.frequency); o.connect(f).connect(g).connect(out(c)); o.start(t); lfo.start(t); o.stop(t + 0.6); lfo.stop(t + 0.6);
+            for (let k = 0; k < 10; k++) hiss(c, { dur: 0.05, type: 'bandpass', freq: 500 + Math.random() * 1500, gain: 0.25, q: 3, delay: 0.25 + Math.random() * 0.25 });
+        },
         bell(notes) { const c = ctx(); if (!c) return; notes.forEach((f, k) => { ping(c, f, 1.6, 0.25, k * 0.55); ping(c, f * 2.76, 0.8, 0.05, k * 0.55); }); },
     };
     const WESTMINSTER = [329.6, 261.6, 293.7, 196.0];   // the Japanese school bell
@@ -514,6 +522,14 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         flip();
     }
     destruction.onBreak = onBreak;
+    // A section of wall with nothing left under it: it groans, dust sifts from the crack, the building shudders, and it comes down.
+    destruction.onCollapse = ({ point, inward }) => {
+        sound.groan();
+        puff(dust, point, 30, { color: 0xe4ded0, spread: 0.4, speed: 0.25, size: 0.16, life: 3.5, up: -0.4, dir: inward });
+        shake?.(point, 0.8);
+        state.dust = Math.min(2.6, state.dust + 0.4);
+        if (!state.said.has('moment:collapse')) { state.said.add('moment:collapse'); setTimeout(() => bullet(performance.now() / 1000, 0.25, 1.3), 380); say('THE WALL HAS GIVEN UP.'); }
+    };
 
     function lodge(tool, i, piece, point, dir, now) {
         const pivot = new Group();

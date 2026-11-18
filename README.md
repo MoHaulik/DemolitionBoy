@@ -9,7 +9,7 @@ It begins in a boring class: you are the boy at the back desk, the teacher drone
 - **Works with bare hands** (Quest hand tracking) or controllers.
 - **Walk** by swinging your free arm (the one without a tool), like in Goats: swing to go, look where you want to go. With controllers the left stick walks too.
 - **One tool at a time.** You start with the **axe** in your right hand. **Tap** (pinch your fingers, or pull the trigger) to swap to the **hammer** and back, into whichever hand tapped.
-- **Everything breaks**: walls through to outside, the blackboard, every window pane, desks and chairs (shove them, topple them, take them apart), shelves, the lectern. Rapier physics and Voronoi fracture around each blow.
+- **Everything breaks**: walls through to outside (knock out two sections side by side and the wall above collapses), the blackboard, every window pane, desks and chairs (shove them, topple them, take them apart), shelves, the lectern. Rapier physics and Voronoi fracture around each blow.
 - The **axe** (a firefighter's pick-head axe) cleaves wood. Lead with the edge and hit square-on; a good chop bites in and sticks. Pull your hand away to wrench it free.
 - The **sledgehammer** smashes glass, pottery and plaster: windows, pots, vases, the lucky cat, the Principal's bust, the volcano, the walls.
 - Swing speed at contact sets the damage, and so does follow-through. A tap dents, a committed swing sends debris flying.

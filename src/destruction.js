@@ -120,6 +120,7 @@ export function createDestruction({ scene, physics, room }) {
     // Loose pieces: a mesh of their own while they move.
     const live = new Set();
     function loosen(p, velocity, spin) {
+        if (p.cell && p.anchored) scheduleCheck();
         if (p.slot) { batchRemove(p.slot); p.slot = null; }
         if (p.body.isFixed()) p.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
         p.anchored = false;
@@ -156,9 +157,73 @@ export function createDestruction({ scene, physics, room }) {
         g.setAttribute('uv', new BufferAttribute(out, 2));
         return g;
     }
+    // ---- Structure ------------------------------------------------------------------------------------------------
+    // The walls are courses of tiles. A tile stands if what is under it stands. One tile knocked out and the one above
+    // holds, carried by its neighbours like a lintel; knock out two side by side and the wall above them has nothing:
+    // it groans, cracks and comes down into the room, and whatever was resting on it follows.
+    const cells = new Map();
+    function cellOf(s) {
+        const { wall, col, y0, y1 } = s.cell, key = `${wall}:${col}:${y0.toFixed(2)}`;
+        if (!cells.has(key)) {
+            const along = wall[0] === 'x' ? 'x' : 'z', across = along === 'x' ? 'z' : 'x';
+            const [w, , d] = s.size, half = (along === 'x' ? w : d) / 2, plane = s.pos[across === 'x' ? 0 : 2];
+            cells.set(key, { key, wall, col, y0, y1, along, across, mid: s.pos[along === 'x' ? 0 : 2], half, plane, inward: -Math.sign(plane), collapsed: false });
+        }
+        return cells.get(key);
+    }
+    const cellAt = (wall, col, y0, y1) => [...cells.values()].find((c) => c.wall === wall && c.col === col && (y1 === undefined ? Math.abs(c.y0 - y0) < 0.03 : Math.abs(c.y1 - y1) < 0.03));
+    // How much of a tile is still in the wall: rays through it on a 3 x 3 grid, counting what they meet of that tile.
+    function coverage(c, memo) {
+        if (memo.has(c.key)) return memo.get(c.key);
+        let hits = 0;
+        for (const u of [0.2, 0.5, 0.8]) for (const v of [0.2, 0.5, 0.8]) {
+            const o = { x: 0, y: c.y0 + (c.y1 - c.y0) * v, z: 0 }, d = { x: 0, y: 0, z: 0 };
+            o[c.along] = c.mid - c.half + 2 * c.half * u; o[c.across] = c.plane + c.inward * 0.5; d[c.across] = -c.inward;
+            if (world.castRay(new RAPIER.Ray(o, d), 1.0, true, undefined, undefined, undefined, undefined, (k) => { const p = pieces.get(k.handle); return !!p && p.anchored && p.cell === c.key; })) hits++;
+        }
+        memo.set(c.key, c.collapsed ? 0 : hits / 9);
+        return memo.get(c.key);
+    }
+    const standing = (c, memo) => !c.collapsed && coverage(c, memo) >= 0.5;
+    function supported(c, memo, depth = 0) {
+        if (c.y0 < 0.05 || depth > 6) return true;   // on the floor
+        const below = cellAt(c.wall, c.col, undefined, c.y0);
+        return !below || (standing(below, memo) && supported(below, memo, depth + 1));   // nothing modelled underneath: the building holds it
+    }
+    let checkAt = 0;
+    const scheduleCheck = (delay = 0.45) => { const t = performance.now() / 1000 + delay; checkAt = checkAt ? Math.min(checkAt, t) : t; };
+    function checkStructure() {
+        const memo = new Map();
+        for (const c of [...cells.values()].sort((a, b) => a.y0 - b.y0)) {
+            if (c.collapsed || c.y0 < 0.05 || coverage(c, memo) === 0 || supported(c, memo)) continue;
+            const holds = (n) => !n || (standing(n, memo) && supported(n, memo));   // a wall's end is held by the corner
+            if (holds(cellAt(c.wall, c.col - 1, c.y0)) && holds(cellAt(c.wall, c.col + 1, c.y0))) continue;   // a lintel
+            collapse(c);
+        }
+    }
+    function collapse(c) {
+        c.collapsed = true;
+        const centre = new Vector3(), inward = new Vector3();
+        centre[c.along] = c.mid; centre.y = (c.y0 + c.y1) / 2; centre[c.across] = c.plane; inward[c.across] = c.inward;
+        api.onCollapse?.({ point: centre.clone().setY(c.y1), inward, cell: c });
+        setTimeout(() => {   // a beat of groaning first; then it goes, falling forward into the room
+            const fall = inward.clone().multiplyScalar(0.9).add(new Vector3(0, -0.3, 0));
+            const inside = (p) => { const e = p.matrix.elements, x = { x: e[12], y: e[13], z: e[14] }; return Math.abs(x[c.along] - c.mid) < c.half && x.y > c.y0 - 0.03 && x.y < c.y1 + 0.06 && (x[c.across] - c.plane) * c.inward > -0.2 && (x[c.across] - c.plane) * c.inward < 0.25; };
+            for (const p of new Set(pieces.values())) {
+                if (!p.anchored || p.gone || p.parts || p.prop || p.rubble || p.key === 'glass') continue;   // window glass has its own frame
+                if (p.cell === c.key && p.generation === 0) fracture(p, centre, fall, 0.3, true);
+                else if (p.cell === c.key || (!p.cell && inside(p))) loosen(p, fall.clone().multiplyScalar(0.6 + Math.random() * 0.6), new Vector3(rnd(), rnd(), rnd()).multiplyScalar(2));   // the rails, the board, what hangs on it
+            }
+            const size = new Vector3(0.1, c.y1 - c.y0, 0.1); size[c.along] = c.half * 2; size[c.across] = 0.5;
+            releaseMounts({ matrix: new Matrix4().makeTranslation(centre.x, centre.y, centre.z) }, size);
+            wakeNear(centre, 2);
+            scheduleCheck(0.6);   // and what was standing on it
+        }, 380);
+    }
+
     const buildRoom = () => { for (const s of room.pieces) {
         const pos = new Vector3(...s.pos), g = tint(worldUV(box(...s.size), pos, s.tile, s.uv), Infinity, 0xffffff);
-        addPiece({ key: s.mat, geometry: g, matrix: new Matrix4().makeTranslation(pos.x, pos.y, pos.z), kind: s.kind, anchored: true, hp: s.kind === 'trim' ? 0.4 : undefined });
+        addPiece({ key: s.mat, geometry: g, matrix: new Matrix4().makeTranslation(pos.x, pos.y, pos.z), kind: s.kind, anchored: true, hp: s.kind === 'trim' ? 0.4 : undefined, extra: { cell: s.cell && cellOf(s).key } });
     } };
     buildRoom();
 
@@ -211,7 +276,7 @@ export function createDestruction({ scene, physics, room }) {
     let nextJob = 0;
 
     /** Break a piece at a world point, along a direction, with an energy of about 0 (a tap) to 1+ (a full swing). */
-    function fracture(p, point, dir, energy) {
+    function fracture(p, point, dir, energy, collapsing = false) {
         if (p.pending || p.gone) return;
         p.pending = true;
         const inverse = p.matrix.clone().invert(), local = point.clone().applyMatrix4(inverse), s = p.size;
@@ -219,7 +284,7 @@ export function createDestruction({ scene, physics, room }) {
         const axis = new Vector3(thin === 'x' ? 1 : 0, thin === 'y' ? 1 : 0, thin === 'z' ? 1 : 0);
         const big = Math.max(s.x, s.y, s.z);
         if (big < 0.09 || p.generation >= 3) return crumble(p, point, dir, energy);   // too small to split again: it just goes
-        const g = p.geometry, job = { id: nextJob++, p, point: point.clone(), dir: dir.clone(), energy };
+        const g = p.geometry, job = { id: nextJob++, p, point: point.clone(), dir: dir.clone(), energy, collapsing };
         let seeds = null, count = Math.round(Math.min(BUDGET.fragments, 6 + energy * 8 + big * 4));
         if (p.material === 'glass') seeds = radial(local, axis, s, energy);
         else if (p.material === 'wood' && flat) seeds = grain(local, axis, s);
@@ -263,7 +328,7 @@ export function createDestruction({ scene, physics, room }) {
     const pendingRelease = [];
     // A generator: fragments are made a few per frame (each is a body and a hull), so a big break never costs a frame.
     // The piece's collider goes at once, so nothing new collides with it; its picture goes when the last fragment is in.
-    function* shatter({ p, point, dir, energy }, fragments) {
+    function* shatter({ p, point, dir, energy, collapsing }, fragments) {
         if (p.gone) return;
         if (!fragments.length) return crumble(p, point, dir, energy);
         const velocity = p.anchored ? new Vector3() : new Vector3().copy(p.body.linvel());
@@ -271,7 +336,8 @@ export function createDestruction({ scene, physics, room }) {
         pieces.delete(p.collider.handle); physics.remove(p.body); p.gone = true; live.delete(p);   // no body from here on: off the moving list too
         releaseMounts(p, s);
         wakeNear(point, 2);
-        api.onBreak?.(p, { point, energy });
+        api.onBreak?.(p, { point, energy, collapsing });
+        if (p.cell) scheduleCheck();
         // What the blow itself carries away: everything within reach, and always the two cells nearest it (the cell that
         // contains the impact can have its centre well away from it; leaving it would be a crack, not a hole).
         const centres = fragments.map((f) => new Vector3(...f.center).applyMatrix4(p.matrix).distanceTo(point)).sort((a, b) => a - b);
@@ -285,7 +351,7 @@ export function createDestruction({ scene, physics, room }) {
             const local = new Vector3(...f.center), matrix = p.matrix.clone().multiply(new Matrix4().makeTranslation(local.x, local.y, local.z));
             const centre = new Vector3().setFromMatrixPosition(matrix), far = centre.distanceTo(point);
             const edge = Math.min(...['x', 'y', 'z'].filter((a) => s[a] > 0.05).map((a) => s[a] / 2 - Math.abs(local[a])));
-            const kick = () => dir.clone().multiplyScalar((0.6 + energy * 2.4) * Math.exp(-far / 0.25)).add(centre.clone().sub(point).normalize().multiplyScalar(0.4 + energy)).add(new Vector3(rnd(), rnd(), rnd()).multiplyScalar(0.4)).add(velocity);
+            const kick = () => collapsing ? dir.clone().multiplyScalar(0.5 + Math.random() * 0.7).add(new Vector3(rnd(), rnd(), rnd()).multiplyScalar(0.35)) : dir.clone().multiplyScalar((0.6 + energy * 2.4) * Math.exp(-far / 0.25)).add(centre.clone().sub(point).normalize().multiplyScalar(0.4 + energy)).add(new Vector3(rnd(), rnd(), rnd()).multiplyScalar(0.4)).add(velocity);
             const spin = () => new Vector3(rnd(), rnd(), rnd()).multiplyScalar(4 + energy * 10);
             const hp = Math.max(0.15, p.max * 0.5);
             if (wasAnchored && p.material === 'glass') {
@@ -294,8 +360,8 @@ export function createDestruction({ scene, physics, room }) {
                 if (far > reach) pendingRelease.push({ at: now + 0.04 + far * 1.4 + Math.random() * 0.25, p: shard, v: dir.clone().multiplyScalar(0.3).add(new Vector3(rnd() * 0.3, -0.2, rnd() * 0.3)) });   // the cascade
                 return;
             }
-            const stays = wasAnchored && far > reach && Math.random() > 0.15;
-            addPiece({ key: p.key, geometry: g, matrix, kind: stays ? p.kind : 'fragment', anchored: stays, hp, convex: true, generation: p.generation + 1, velocity: stays ? null : kick(), spin: stays ? null : spin() });
+            const stays = !collapsing && wasAnchored && far > reach && Math.random() > 0.15;
+            addPiece({ key: p.key, geometry: g, matrix, kind: stays ? p.kind : 'fragment', anchored: stays, hp, convex: true, generation: p.generation + 1, velocity: stays ? null : kick(), spin: stays ? null : spin(), extra: stays ? { cell: p.cell } : {} });
         };
         for (const f of fragments) { one(f); yield; }
         if (p.slot) { batchRemove(p.slot); p.slot = null; }
@@ -402,7 +468,8 @@ export function createDestruction({ scene, physics, room }) {
     const mountHomes = room.mounts.map((o) => ({ o, parent: o.parent, position: o.position.clone(), quaternion: o.quaternion.clone() }));
     function reset() {
         if (!api.dirty) return;   // untouched since the last time: nothing to put back
-        api.dirty = false;
+        api.dirty = false; checkAt = 0;
+        for (const c of cells.values()) c.collapsed = false;
         waiting.clear(); pendingRelease.length = 0; incoming.length = 0;
         for (const p of new Set(pieces.values())) if (!p.parts && !p.prop) dropPiece(p);
         for (const p of [...live]) dropPiece(p);
@@ -424,6 +491,7 @@ export function createDestruction({ scene, physics, room }) {
     // ---- Per frame -----------------------------------------------------------------------------------------------
     function update(dt) {
         const now = performance.now() / 1000;
+        if (checkAt && now >= checkAt && !incoming.length) { checkAt = 0; checkStructure(); }   // once the last break's fragments are all in place
         for (let budget = 3; incoming.length && budget > 0; budget--) if (incoming[0].next().done) incoming.shift();   // a few new bodies a frame
         for (let i = pendingRelease.length - 1; i >= 0; i--) {
             const r = pendingRelease[i];
@@ -444,5 +512,5 @@ export function createDestruction({ scene, physics, room }) {
     }
 
     function pieceOf(collider) { return pieces.get(collider.handle); }
-    return Object.assign(api, { pieces, furniture, props, live, fracture, dismantle, breakProp, addProp, pieceOf, update, loosen, reset, batches });
+    return Object.assign(api, { pieces, furniture, props, live, cells, coverage: (c) => coverage(c, new Map()), fracture, dismantle, breakProp, addProp, pieceOf, update, loosen, reset, batches });
 }

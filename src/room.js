@@ -55,13 +55,15 @@ export function buildRoom(scene, { cjk }) {
     // Everything that can be broken is handed over as a piece, not built: a box with its material, world-scaled UVs and a kind.
     // The destruction system batches the intact ones and gives each a collider. `mount` records what hangs on them.
     const pieces = [], mounts = [];
-    const piece = (mat, w, h, d, x, y, z, { tile = 1, kind = 'wall', cast = true, uv } = {}) => pieces.push({ mat, size: [w, h, d], pos: [x, y, z], tile, kind, cast, uv });
+    const piece = (mat, w, h, d, x, y, z, { tile = 1, kind = 'wall', cast = true, uv, cell } = {}) => pieces.push({ mat, size: [w, h, d], pos: [x, y, z], tile, kind, cast, uv, cell });
     const wall = (mat, axis, from, to, rows, depth, at, { tile = 1, kind = 'wall', size = 0.95 } = {}) => {   // a wall cut into tiles about `size` wide
         const n = Math.max(1, Math.round((to - from) / size)), step = (to - from) / n;
         for (let i = 0; i < n; i++) for (const [y0, y1] of rows) {
             const c = from + step * (i + 0.5);
-            if (axis === 'x') piece(mat, step, y1 - y0, depth, c, (y0 + y1) / 2, at, { tile, kind });
-            else piece(mat, depth, y1 - y0, step, at, (y0 + y1) / 2, c, { tile, kind });
+            // Wall tiles know their place in the wall (which wall, which column, which course), so the wall can stand or fall.
+            const cell = kind === 'wall' ? { wall: `${axis}${Math.sign(at)}`, col: i, y0, y1 } : undefined;
+            if (axis === 'x') piece(mat, step, y1 - y0, depth, c, (y0 + y1) / 2, at, { tile, kind, cell });
+            else piece(mat, depth, y1 - y0, step, at, (y0 + y1) / 2, c, { tile, kind, cell });
         }
     };
     const mount = (object) => { mounts.push(object); return object; };
