@@ -7,6 +7,7 @@ First-person, two-handed demolition in WebXR for Meta Quest 3: an axe in one han
 It begins in a boring class: you are the boy at the back desk, the teacher drones, a fly finds your doodle, your eyes get heavy. Then the dream. When the bell rings you wake up in class, and everyone is staring. Tap during the class to skip ahead.
 
 - **Works with bare hands** (Quest hand tracking) or controllers.
+- **Grab and throw** anything loose with your free hand (grip or pinch near it, let go mid-swing): a chair goes through a window.
 - **Walk** by swinging your free arm (the one without a tool), like in Goats: swing to go, look where you want to go. With controllers the left stick walks too.
 - **One tool at a time.** You start with the **axe** in your right hand. **Tap** (pinch your fingers, or pull the trigger) to swap to the **hammer** and back, into whichever hand tapped.
 - **Everything breaks**: walls through to outside (knock out two sections side by side and the wall above collapses), the blackboard, every window pane, desks and chairs (shove them, topple them, take them apart), shelves, the lectern. Rapier physics and Voronoi fracture around each blow.

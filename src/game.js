@@ -91,7 +91,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         anchors.forEach((a, i) => {
             if (!a.visible) { walk.last[i] = null; return; }
             walk.hand.setFromMatrixPosition(a.matrix);   // rig-local: your own moving body doesn't read as a swing
-            if (walk.last[i] && dt > 0 && i === free && !tools.some((t) => t.lodged && t.hand === i)) {
+            if (walk.last[i] && dt > 0 && i === free && !grab.held && !tools.some((t) => t.lodged && t.hand === i)) {   // holding something, the arm isn't walking
                 const speed = walk.hand.distanceTo(walk.last[i]) / dt;
                 if (speed > WALK.min) walk.v.addScaledVector(walk.look, Math.min(speed, WALK.max) * WALK.push * dt);
             }
@@ -126,7 +126,18 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     }
     // Tap to swap: a pinch with bare hands, or the trigger, or the grip, swaps axe and hammer into the hand that did it.
     const swap = (i) => { if (state.phase === 'ready' || state.phase === 'play') equip(1 - holder.tool, i); };
-    [0, 1].forEach((i) => { const c = renderer.xr.getController(i); c.addEventListener('select', () => swap(i)); c.addEventListener('squeezestart', () => swap(i)); });
+    // A press (pinch, trigger or grip): with the free hand near something loose, it grabs; otherwise it swaps the tool.
+    // Letting go throws.
+    const press = (i) => {
+        if (state.phase !== 'ready' && state.phase !== 'play') return;
+        if (holder.hand !== null && i !== holder.hand && !grab.held) { const p = reachFor(i); if (p) return startGrab(i, p); }
+        swap(i);
+    };
+    [0, 1].forEach((i) => {
+        const c = renderer.xr.getController(i);
+        c.addEventListener('selectstart', () => press(i)); c.addEventListener('squeezestart', () => press(i));
+        for (const end of ['selectend', 'squeezeend']) c.addEventListener(end, () => { if (grab.held && grab.hand === i) release(); });
+    });
     const active = () => tools[holder.tool];
 
     // New things to break, placed where the room had a gap for them, each a rigid body: knock them off, they fall, they break.
@@ -353,6 +364,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
             f.connect(g).connect(out(c));
             return () => { const n = c.currentTime; g.gain.cancelScheduledValues(n); g.gain.setValueAtTime(g.gain.value, n); g.gain.linearRampToValueAtTime(0, n + 0.04); os.forEach((o) => o.stop(n + 0.06)); };
         },
+        grab(heavy) { const c = ctx(); if (!c) return; ping(c, 220 - heavy * 120, 0.12, 0.25, 0, 'triangle', 140 - heavy * 60); hiss(c, { dur: 0.08, type: 'lowpass', freq: 900, gain: 0.2 }); },
         groan() {   // timber and plaster giving way: a low, wavering creak, then the crackle of it letting go
             const c = ctx(); if (!c) return;
             const t = c.currentTime, o = new OscillatorNode(c, { type: 'sawtooth', frequency: 58 }), lfo = new OscillatorNode(c, { frequency: 5.5 }), depth = new GainNode(c, { gain: 9 });
@@ -598,6 +610,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         writeTag('0:00', true);
     }
     function clearRoom() {   // the whole room, put back: walls, glass, furniture, everything on the shelves, the light
+        grab.held = null; grab.thrown = null; grab.hover = null;
         for (const tool of tools) if (tool.lodged) free(tool, false);
         destruction.reset();
         shafts.clear();
@@ -647,8 +660,122 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     // Brittle things that land hard break; heavy things that land hard thud; glass tinkles.
     let lastTink = 0;
     const born = performance.now() / 1000;
+    // ---- Grab and throw ---------------------------------------------------------------------------------------------
+    // The free hand picks up anything loose: chairs, desks, books, rubble, the cat. What it holds is still a body: it is
+    // pulled towards the hand by a spring that a heavy thing can't follow quickly (a book snaps to the hand, a desk is a
+    // heave), it still collides, and what it hits (held or thrown) takes the blow from its real momentum.
+    const grab = { held: null, hand: -1, offset: new Matrix4(), thrown: null, hover: null, hist: [], frame: 0 };
+    const handWorld = (i) => { anchors[i].updateMatrixWorld(true); return anchors[i].matrixWorld; };
+    const bodyMatrix = (b) => { const t = b.translation(), r = b.rotation(); return new Matrix4().compose(new Vector3(t.x, t.y, t.z), new Quaternion(r.x, r.y, r.z, r.w), new Vector3(1, 1, 1)); };
+    const grabbable = (p) => !!p && !p.gone && !p.pending && !!p.body && (p.parts || p.prop || p.rubble || p.body.isDynamic?.());
+    const reachBall = [new RAPIER.Ball(0.1), new RAPIER.Ball(0.2)];
+    function reachFor(i) {
+        if (!anchors[i].visible) return null;
+        const h = new Vector3().setFromMatrixPosition(handWorld(i));
+        for (const ball of reachBall) {   // in the hand first; failing that, within a short reach
+            let best = null, bd = Infinity;
+            physicsWorld.intersectionsWithShape(h, { x: 0, y: 0, z: 0, w: 1 }, ball, (c) => {
+                const p = destruction.pieceOf(c);
+                if (grabbable(p)) { const t = p.body.translation(), d = Math.hypot(t.x - h.x, t.y - h.y, t.z - h.z); if (d < bd) { bd = d; best = p; } }
+                return true;
+            });
+            if (best) return best;
+        }
+        return null;
+    }
+    const collidersOf = (p) => p.colliders ?? [p.collider];
+    function startGrab(i, p) {
+        if (p.rubble || p.anchored) destruction.loosen(p);   // rubble that had settled comes up off the floor
+        p.body.wakeUp();
+        grab.held = p; grab.hand = i; grab.hist.length = 0;
+        grab.offset.copy(handWorld(i)).invert().multiply(bodyMatrix(p.body));
+        for (const c of collidersOf(p)) { c.setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS); c.setContactForceEventThreshold(1); }
+        grab.thrown = { p, until: Infinity };
+        sound.grab(Math.min(1, p.body.mass() / 8)); haptic(i, 0.5, 40);
+    }
+    function release() {
+        const p = grab.held;
+        grab.held = null;
+        if (!p || p.gone) return;
+        // The hand's speed over the last few frames, and a little extra for light things (a flick); heavy ones you heave.
+        const v = new Vector3();
+        if (grab.hist.length > 1) { const a = grab.hist[0], b = grab.hist.at(-1); if (b.t > a.t) v.subVectors(b.p, a.p).divideScalar(b.t - a.t); }
+        const mass = p.body.mass(), boost = Math.min(1.5, 0.6 + 2.2 / Math.max(0.3, mass));
+        v.multiplyScalar(boost);
+        p.body.setLinvel(v, true);
+        p.body.setAngvel(new Vector3(rnd(), rnd(), rnd()).multiplyScalar(v.length() * 1.5 / Math.sqrt(mass)), true);
+        grab.thrown = { p, until: performance.now() / 1000 + 2.5 };
+        if (v.length() > 2) { sound.swap(); haptic(grab.hand, 0.4, 30); }
+    }
+    function hold(dt) {
+        const p = grab.held;
+        if (!p) return;
+        if (p.gone || !anchors[grab.hand].visible) { grab.held = null; return; }
+        const target = handWorld(grab.hand).clone().multiply(grab.offset), tp = new Vector3(), tq = new Quaternion();
+        target.decompose(tp, tq, new Vector3());
+        const now = performance.now() / 1000;
+        grab.hist.push({ p: new Vector3().setFromMatrixPosition(handWorld(grab.hand)), t: now }); if (grab.hist.length > 5) grab.hist.shift();
+        const b = p.body, t = b.translation(), r = b.rotation(), mass = b.mass(), k = Math.min(1, 0.2 + 3 / Math.max(0.3, mass));   // how well it keeps up
+        const want = tp.sub(new Vector3(t.x, t.y, t.z)).multiplyScalar(16), top = 2 + 12 / Math.sqrt(Math.max(0.3, mass));
+        if (want.length() > top) want.setLength(top);
+        const v = b.linvel(), nv = new Vector3(v.x, v.y, v.z).lerp(want, k);
+        b.setLinvel(nv, true);
+        const err = tq.multiply(new Quaternion(r.x, r.y, r.z, r.w).invert());
+        if (err.w < 0) err.set(-err.x, -err.y, -err.z, -err.w);
+        const angle = 2 * Math.acos(Math.min(1, err.w)), sin = Math.sqrt(1 - err.w * err.w);
+        const w = sin > 1e-4 ? new Vector3(err.x / sin, err.y / sin, err.z / sin).multiplyScalar(Math.min(angle * 12, 20) * k) : new Vector3();
+        b.setAngvel(w, true);
+    }
+    // What a held or thrown thing hits: the momentum lands as a blow. A chair through a window; the chair suffers too.
+    const HURTS = { glass: 1, ceramic: 1, plaster: 0.8, wood: 0.7, slate: 0.6, metal: 0.1, paper: 0.5 };
+    function impact(a, b) {
+        const now = performance.now() / 1000, v = grab.thrown?.v ?? a.body.linvel(), speed = Math.hypot(v.x, v.y, v.z);   // its speed going in, not after the solver has stopped it
+        if (speed < 2 || now - (b.lastHit ?? -9) < 0.2) return;
+        b.lastHit = now;
+        const mass = a.body.mass(), e = Math.min(1.4, (speed - 1.8) / 5 * Math.min(1.6, Math.sqrt(mass / 2.5)));
+        const t = a.body.translation(), point = new Vector3(t.x, t.y, t.z), dir = new Vector3(v.x, v.y, v.z).normalize();
+        lastBlow = { tool: 'throw', affinity: 1, e, at: now };
+        (sound[b.material] ?? sound.wood)(Math.max(0.3, e), false);
+        burst(b.material, point, dir, Math.round(3 + e * 10), 1 + speed * 0.3);
+        push(b, point, dir, mass * speed * 0.4);
+        if (!state.said.has('throw')) { state.said.add('throw'); say('NO THROWING IN CLASS.'); }
+        if (b.hp !== Infinity && b.hp > 0) {
+            b.hp -= e * (HURTS[b.material] ?? 0.6);
+            if (b.hp <= 0) { breakPiece(b, point, dir, e); a.body.setLinvel(new Vector3(v.x, v.y, v.z).multiplyScalar(0.75), true); }   // it goes through what it broke
+        }
+        if (mass > 1.5 && e > 0.5) {   // something heavy arriving fast takes the glass around it too
+            const c = a.body.worldCom?.() ?? t;
+            physicsWorld.intersectionsWithShape(c, { x: 0, y: 0, z: 0, w: 1 }, new RAPIER.Ball(0.35), (k) => {
+                const g = destruction.pieceOf(k);
+                if (g && !g.gone && g.anchored && g.material === 'glass' && g.hp > 0) { g.hp = 0; breakPiece(g, new Vector3(c.x, c.y, c.z), dir, e); }
+                return true;
+            });
+        }
+        if (a.hp !== Infinity && a.hp > 0 && a !== grab.held) { a.hp -= e * 0.35; if (a.hp <= 0) breakPiece(a, point, dir.negate(), e * 0.7); }   // what you threw takes it too
+    }
+    // The free hand, shown: a soft glow; yellow when something is in reach; it closes when it holds.
+    const marker = new Mesh(new SphereGeometry(0.03, 16, 12), new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false }));
+    marker.visible = false; scene.add(marker);
+    function showHand(t, armed) {
+        const i = holder.hand === null ? -1 : 1 - holder.hand;
+        marker.visible = armed && i >= 0 && anchors[i].visible;
+        if (!marker.visible) return;
+        marker.position.setFromMatrixPosition(handWorld(i));
+        if (!grab.held && grab.frame++ % 3 === 0) grab.hover = reachFor(i);
+        const hot = grab.held || grab.hover;
+        marker.material.color.set(grab.held ? 0xff9a30 : hot ? 0xffe040 : 0xffffff);
+        marker.material.opacity = grab.held ? 0.7 : hot ? 0.55 + 0.25 * Math.sin(t * 10) : 0.3;
+        marker.scale.setScalar(grab.held ? 0.75 : hot ? 1.25 : 1);
+    }
+
     function onForce(event) {
         const now = performance.now() / 1000, force = event.totalForceMagnitude();
+        const th = grab.thrown;
+        if (th && now < th.until && !th.p.gone) {
+            const p1 = destruction.pieces.get(event.collider1()), p2 = destruction.pieces.get(event.collider2());
+            const other = p1 === th.p ? p2 : p2 === th.p ? p1 : null;
+            if (other && !other.gone) impact(th.p, other);
+        }
         if (now - born < 2) return;   // the first moments: everything settling onto its shelf is not a fall
         for (const handle of [event.collider1(), event.collider2()]) {
             const p = destruction.pieces.get(handle);
@@ -690,6 +817,8 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
     function update(t, dt) {
         state.dust *= Math.exp(-dt / 35);
         const armed = state.phase === 'ready' || state.phase === 'play' || state.phase === 'over';   // the tools exist only in the dream
+        if (!armed && grab.held) grab.held = null;
+        showHand(t, armed && renderer.xr.isPresenting);
         for (const tool of tools) tool.mesh.visible = armed && (tool === active() || !!tool.lodged);
         for (let i = anims.length - 1; i >= 0; i--) { const a = anims[i]; a.t += dt; const f = Math.min(1, a.t / a.dur); a.run(f); if (f === 1) { anims.splice(i, 1); a.done?.(); } }
         const slow = timeScale(t);
@@ -701,6 +830,8 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
             puff(dust, new Vector3(tt.x, tt.y, tt.z).add(nozzle), 6, { color: 0xffffff, speed: 2.2, size: 0.09, life: 3, grow: 1.4, alpha: 0.35, dir: jet, drag: 1.2 });
             ext.body.applyImpulse(jet.multiplyScalar(-0.35), true);
         }
+        hold(dt);
+        if (grab.thrown && !grab.thrown.p.gone) { const v = grab.thrown.p.body.linvel(); grab.thrown.v = { x: v.x, y: v.y, z: v.z }; }
         const moving = physics.step(dt * slow, onForce);
         destruction.update(dt);
         if (moving && (state.frame = (state.frame ?? 0) + 1) % 2 === 0) renderer.shadowMap.needsUpdate = true;   // moving things move their shadows
@@ -722,7 +853,7 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
         if (freeAnchor?.visible) {
             freeAnchor.updateMatrixWorld(true);
             const h = new Vector3().setFromMatrixPosition(freeAnchor.matrixWorld), v = dt > 0 ? h.distanceTo(handLast) / dt : 0;
-            steer(handBody, h, v < 1.5); handLast.copy(h);
+            steer(handBody, h, v < 1.5 && !grab.held); handLast.copy(h);   // holding something, the hand itself doesn't shove
         } else steer(handBody, null);
         tools.forEach((tool) => {
             const i = tool.hand ?? 0;
@@ -775,5 +906,5 @@ export function createGame({ scene, renderer, rig, camera, room, audio, say, fli
             if (moved) pool.mesh.instanceMatrix.needsUpdate = true;
         }
     }
-    return { update, state, tools, props, hat, ext, books, plunger, reset, start, finish, equip, holder, report, destruction, showReport, backToClass, shafts, cine };
+    return { update, state, tools, props, hat, ext, books, plunger, reset, start, finish, equip, holder, report, destruction, showReport, backToClass, shafts, cine, grab };
 }
